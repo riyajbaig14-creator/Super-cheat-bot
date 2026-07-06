@@ -1,4 +1,4 @@
-# ektelegramcontrol.py - Complete Hosting Panel with Auto Backup + Email Notifications
+# ektelegramcontrol.py - Complete Hosting Panel with Full Bot Control + Storage Management + Auto Backup
 
 from flask import Flask, request, jsonify, render_template_string, send_file, Response, stream_with_context
 from flask_cors import CORS
@@ -29,11 +29,7 @@ import tempfile
 import mimetypes
 import telebot
 from telebot import types
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.base import MIMEBase
-from email import encoders
-from email.mime.text import MIMEText
+import schedule
 
 app = Flask(__name__)
 app.secret_key = 'your-secret-key-change-in-production'
@@ -48,25 +44,6 @@ BOT_TOKEN = os.environ.get('BOT_TOKEN', '8650477558:AAGCjvWFUVRBKV4Nh8vmS9CjNDio
 BOT_USERNAME = os.environ.get('BOT_USERNAME', '@Card_hacker_12')
 OWNER_PASSWORD = os.environ.get('OWNER_PASSWORD', 'riyaj1858')
 
-# ============================================================
-# EMAIL CONFIGURATION - CHANGE HERE
-# ============================================================
-
-# ✅ Ye email change karo - Jis email par backup aana chahiye
-EMAIL_RECEIVER = os.environ.get('EMAIL_RECEIVER', 'lalaramkhatki4@gmail.com')
-EMAIL_SENDER = os.environ.get('EMAIL_SENDER', 'lalaramkhatki4@gmail.com')
-
-# ✅ IMPORTANT: Email password environment variable se le raha hai
-# Render.com par environment variable DAALNA HAI: EMAIL_PASSWORD
-EMAIL_PASSWORD = os.environ.get('EMAIL_PASSWORD', '')
-
-# Agar environment variable mein nahi hai toh ye default use karega
-# BUT RECOMMENDED: Environment variable use karo
-if not EMAIL_PASSWORD:
-    print("⚠️ EMAIL_PASSWORD not set in environment variables!")
-    print("⚠️ Please set EMAIL_PASSWORD in Render.com Environment Variables")
-    print("⚠️ Email backup will not work without password!")
-
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_DIR = os.path.join(BASE_DIR, 'uploads')
 PROCESSES_FILE = os.path.join(BASE_DIR, 'processes.json')
@@ -77,10 +54,15 @@ TERMINAL_SESSIONS_FILE = os.path.join(BASE_DIR, 'terminal_sessions.json')
 BOT_UPLOAD_DIR = os.path.join(BASE_DIR, 'upload_bots')
 REQUIREMENTS_DIR = os.path.join(BASE_DIR, 'requirements_temp')
 BACKUP_DIR = os.path.join(BASE_DIR, 'backups')
+STORAGE_FILE = os.path.join(BASE_DIR, 'storage.json')
 
-# Storage limits
-MAX_STORAGE_MB = 480
-MAX_STORAGE_BYTES = MAX_STORAGE_MB * 1024 * 1024
+# ============================================================
+# STORAGE CONFIG
+# ============================================================
+MAX_STORAGE_BYTES = 480 * 1024 * 1024  # 480MB
+STORAGE_WARNING_PERCENT = 80
+STORAGE_CLEANUP_PERCENT = 90
+MAX_FILES_PER_USER = 5
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(LOGS_DIR, exist_ok=True)
@@ -89,309 +71,14 @@ os.makedirs(REQUIREMENTS_DIR, exist_ok=True)
 os.makedirs(BACKUP_DIR, exist_ok=True)
 
 # ============================================================
-# EMAIL FUNCTIONS
-# ============================================================
-
-def send_email_notification(subject, body, attachment_path=None):
-    """Send email notification with optional attachment"""
-    try:
-        if not EMAIL_PASSWORD:
-            print("❌ EMAIL_PASSWORD not set. Email not sent.")
-            return False
-        
-        msg = MIMEMultipart()
-        msg['From'] = EMAIL_SENDER
-        msg['To'] = EMAIL_RECEIVER
-        msg['Subject'] = subject
-        
-        msg.attach(MIMEText(body, 'plain'))
-        
-        if attachment_path and os.path.exists(attachment_path):
-            with open(attachment_path, 'rb') as f:
-                part = MIMEBase('application', 'octet-stream')
-                part.set_payload(f.read())
-                encoders.encode_base64(part)
-                part.add_header(
-                    'Content-Disposition',
-                    f'attachment; filename={os.path.basename(attachment_path)}'
-                )
-                msg.attach(part)
-        
-        server = smtplib.SMTP('smtp.gmail.com', 587)
-        server.starttls()
-        server.login(EMAIL_SENDER, EMAIL_PASSWORD)
-        server.send_message(msg)
-        server.quit()
-        
-        print(f"✅ Email sent: {subject}")
-        return True
-    except Exception as e:
-        print(f"❌ Email error: {e}")
-        return False
-
-def send_website_online_notification():
-    """Send notification when website goes online"""
-    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    stats = get_storage_stats()
-    
-    subject = "🚀 PYTHON HOSTING - Website is ONLINE!"
-    body = f"""🚀 PYTHON HOSTING PANEL
-
-✅ Website is ONLINE!
-📅 Time: {timestamp}
-🤖 Bot: {BOT_USERNAME}
-👤 Owner: {OWNER_ID}
-
-📊 Storage Status:
-- Used: {stats['used_mb']} MB / {stats['total_mb']} MB
-- Free: {stats['free_mb']} MB
-- Usage: {stats['percent_used']}%
-
-📁 Files: {len(get_all_files())}
-🔄 Running Processes: {len(load_processes())}
-
-Website is ready to use!
-"""
-    
-    send_email_notification(subject, body)
-
-def create_backup(backup_name=None):
-    """Create full backup and return file path"""
-    try:
-        if not backup_name:
-            backup_name = f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        
-        backup_file = os.path.join(BACKUP_DIR, f"{backup_name}.zip")
-        
-        with zipfile.ZipFile(backup_file, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            # Users data
-            if os.path.exists(USERS_FILE):
-                zipf.write(USERS_FILE, 'users.json')
-            
-            # Processes data
-            if os.path.exists(PROCESSES_FILE):
-                zipf.write(PROCESSES_FILE, 'processes.json')
-            
-            # Settings
-            if os.path.exists(SETTINGS_FILE):
-                zipf.write(SETTINGS_FILE, 'settings.json')
-            
-            # Uploads folder
-            if os.path.exists(UPLOAD_DIR):
-                for root, dirs, files in os.walk(UPLOAD_DIR):
-                    for file in files:
-                        file_path = os.path.join(root, file)
-                        arcname = os.path.relpath(file_path, BASE_DIR)
-                        zipf.write(file_path, arcname)
-        
-        # Keep only last 10 backups
-        backups = sorted([f for f in os.listdir(BACKUP_DIR) if f.endswith('.zip')])
-        if len(backups) > 10:
-            for old in backups[:-10]:
-                os.remove(os.path.join(BACKUP_DIR, old))
-        
-        return backup_file
-    except Exception as e:
-        print(f"❌ Backup failed: {e}")
-        return None
-
-def create_and_send_backup(reason="Scheduled"):
-    """Create backup and send via email"""
-    try:
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        backup_file = create_backup(f"backup_{timestamp}")
-        
-        if backup_file:
-            stats = get_storage_stats()
-            processes = load_processes()
-            files = get_all_files()
-            
-            subject = f"🔄 PYTHON HOSTING Backup - {reason} - {timestamp}"
-            body = f"""🔄 PYTHON HOSTING Backup
-
-Reason: {reason}
-Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-
-📊 Storage Status:
-- Used: {stats['used_mb']} MB / {stats['total_mb']} MB
-- Free: {stats['free_mb']} MB
-- Usage: {stats['percent_used']}%
-
-📁 Total Files: {len(files)}
-🔄 Running Processes: {len(processes)}
-👥 Total Users: {len(load_users())}
-
-Files included:
-- users.json (User data)
-- processes.json (Running processes)
-- settings.json (Settings)
-- uploads/ (All user files)
-
-Backup created successfully!
-"""
-            send_email_notification(subject, body, backup_file)
-            return True
-        
-        return False
-    except Exception as e:
-        print(f"❌ Backup email failed: {e}")
-        return False
-
-# ============================================================
-# STORAGE MANAGEMENT
-# ============================================================
-
-def get_folder_size(folder_path):
-    """Get total size of folder in bytes"""
-    total = 0
-    try:
-        for dirpath, dirnames, filenames in os.walk(folder_path):
-            for f in filenames:
-                fp = os.path.join(dirpath, f)
-                if os.path.exists(fp):
-                    total += os.path.getsize(fp)
-    except:
-        pass
-    return total
-
-def get_total_storage_usage():
-    """Get total storage used by all uploads"""
-    upload_size = get_folder_size(UPLOAD_DIR)
-    bot_size = get_folder_size(BOT_UPLOAD_DIR)
-    return upload_size + bot_size
-
-def check_storage_available(file_size=0):
-    """Check if there is enough storage space"""
-    current_usage = get_total_storage_usage()
-    return (current_usage + file_size) < MAX_STORAGE_BYTES
-
-def get_storage_stats():
-    """Get storage statistics"""
-    current_usage = get_total_storage_usage()
-    free_space = MAX_STORAGE_BYTES - current_usage
-    return {
-        'used_bytes': current_usage,
-        'used_mb': round(current_usage / (1024 * 1024), 2),
-        'free_bytes': free_space,
-        'free_mb': round(free_space / (1024 * 1024), 2),
-        'total_mb': MAX_STORAGE_MB,
-        'percent_used': round((current_usage / MAX_STORAGE_BYTES) * 100, 1)
-    }
-
-def cleanup_user_files(user_dir, bot_dir):
-    """Cleanup a single user's files - keeps latest 5 files, protects running & bot files"""
-    try:
-        if not os.path.exists(user_dir):
-            return
-        
-        files = []
-        for f in os.listdir(user_dir):
-            fpath = os.path.join(user_dir, f)
-            if os.path.isfile(fpath):
-                # Check if file is protected
-                file_id = f.split('_')[0] if '_' in f else f
-                processes = load_processes()
-                
-                is_running = False
-                if file_id in processes:
-                    if is_process_running(processes[file_id]['pid']):
-                        is_running = True
-                
-                # Check for bot token
-                has_token, _ = detect_bot_token(fpath)
-                
-                # Protected files - never delete
-                if is_running or has_token:
-                    continue
-                
-                files.append({
-                    'name': f,
-                    'path': fpath,
-                    'mtime': os.path.getmtime(fpath)
-                })
-        
-        # Sort by modification time (newest first)
-        files.sort(key=lambda x: x['mtime'], reverse=True)
-        
-        # Keep only latest 5 files, delete rest
-        if len(files) > 5:
-            for f in files[5:]:
-                os.remove(f['path'])
-                # Also remove from bot directory
-                bot_path = os.path.join(bot_dir, f['name'])
-                if os.path.exists(bot_path):
-                    os.remove(bot_path)
-                print(f"🧹 Cleaned up old file: {f['name']}")
-    except Exception as e:
-        print(f"❌ User cleanup error: {e}")
-
-def cleanup_old_files(username=None):
-    """Cleanup old files to free space (keeps latest 5 files per user)"""
-    try:
-        if username:
-            user_dir = os.path.join(UPLOAD_DIR, username)
-            bot_dir = os.path.join(BOT_UPLOAD_DIR, username)
-            cleanup_user_files(user_dir, bot_dir)
-        else:
-            # Cleanup all users
-            for user in os.listdir(UPLOAD_DIR):
-                user_dir = os.path.join(UPLOAD_DIR, user)
-                bot_dir = os.path.join(BOT_UPLOAD_DIR, user)
-                if os.path.isdir(user_dir):
-                    cleanup_user_files(user_dir, bot_dir)
-        return True
-    except Exception as e:
-        print(f"❌ Cleanup error: {e}")
-        return False
-
-def auto_cleanup_if_needed():
-    """Auto cleanup if storage exceeds limit"""
-    stats = get_storage_stats()
-    if stats['percent_used'] > 90:
-        print(f"⚠️ Storage {stats['percent_used']}% used, cleaning up...")
-        cleanup_old_files()
-        return True
-    return False
-
-# ============================================================
-# SCHEDULED BACKUP (Every 6 Hours)
-# ============================================================
-
-def scheduled_backup():
-    """Run backup every 6 hours"""
-    while True:
-        time.sleep(6 * 60 * 60)
-        try:
-            print("⏰ Running scheduled backup...")
-            create_and_send_backup("Scheduled (Every 6 Hours)")
-            auto_cleanup_if_needed()
-            print("✅ Scheduled backup completed")
-        except Exception as e:
-            print(f"❌ Scheduled backup error: {e}")
-
-# Start backup thread
-backup_thread = threading.Thread(target=scheduled_backup, daemon=True)
-backup_thread.start()
-print("✅ Backup scheduler started (every 6 hours)")
-
-# ============================================================
-# PRE-RESTART BACKUP (Signal handler)
-# ============================================================
-
-def signal_handler(signum, frame):
-    """Handle shutdown/restart signals"""
-    print(f"⚠️ Received signal {signum}, creating backup...")
-    create_and_send_backup("Server Restart/Shutdown")
-    sys.exit(0)
-
-signal.signal(signal.SIGTERM, signal_handler)
-signal.signal(signal.SIGINT, signal_handler)
-
-# ============================================================
 # TELEGRAM BOT INIT
 # ============================================================
 
 bot = telebot.TeleBot(BOT_TOKEN)
+
+# ============================================================
+# BOT THREAD START
+# ============================================================
 
 def start_bot():
     print("🚀 Bot starting polling...")
@@ -414,616 +101,215 @@ bot_thread.start()
 print("✅ Bot thread started")
 
 # ============================================================
-# RESTORE PROCESSES ON STARTUP
+# STORAGE MANAGEMENT
 # ============================================================
 
-def restore_all_processes():
-    """Server restart/wake-up par saari files restart karo"""
-    print("🔄 Restoring processes after server wake-up...")
-    processes = load_processes()
-    restored = 0
+def get_storage_usage():
+    total_size = 0
+    file_count = 0
+    for dirpath, dirnames, filenames in os.walk(UPLOAD_DIR):
+        for f in filenames:
+            fp = os.path.join(dirpath, f)
+            if os.path.isfile(fp):
+                total_size += os.path.getsize(fp)
+                file_count += 1
+    return total_size, file_count
+
+def get_storage_info():
+    total, files = get_storage_usage()
+    percent = (total / MAX_STORAGE_BYTES) * 100 if MAX_STORAGE_BYTES > 0 else 0
+    return {
+        'used': total,
+        'used_mb': total / (1024 * 1024),
+        'max': MAX_STORAGE_BYTES,
+        'max_mb': MAX_STORAGE_BYTES / (1024 * 1024),
+        'percent': percent,
+        'files': files
+    }
+
+def check_and_cleanup():
+    storage = get_storage_info()
     
-    for file_id, info in list(processes.items()):
-        if not is_process_running(info.get('pid', 0)):
-            filepath = info.get('filepath')
-            username = info.get('username', 'riyaj')
-            filename = info.get('filename', 'unknown')
+    if storage['percent'] >= STORAGE_CLEANUP_PERCENT:
+        print(f"⚠️ Storage at {storage['percent']:.1f}%, cleaning up...")
+        
+        # Create backup before cleanup
+        backup_path = create_backup("pre_cleanup")
+        send_telegram_message(OWNER_ID, f"🗑️ **Storage Cleanup Initiated**\n\n"
+                               f"Storage: {storage['used_mb']:.1f}MB / {storage['max_mb']:.1f}MB ({storage['percent']:.1f}%)\n"
+                               f"Backup created: `{os.path.basename(backup_path)}`")
+        
+        # Cleanup per user
+        users = load_users()
+        for username in os.listdir(UPLOAD_DIR):
+            user_dir = os.path.join(UPLOAD_DIR, username)
+            if not os.path.isdir(user_dir):
+                continue
             
-            if filepath and os.path.exists(filepath):
-                print(f"🔄 Restarting: {filename}")
-                new_pid = run_file(
-                    filepath, 
-                    file_id, 
-                    filename, 
-                    username, 
-                    cwd=os.path.dirname(filepath)
-                )
-                if new_pid:
-                    restored += 1
-                    print(f"✅ Restarted: {filename} (PID: {new_pid})")
-    
-    print(f"✅ Restored {restored} processes")
-    return restored
-
-# ============================================================
-# TELEGRAM BOT HANDLERS (COMPLETE)
-# ============================================================
-
-user_states = {}
-user_timers = {}
-owner_session = {}
-
-def get_main_keyboard():
-    keyboard = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
-    keyboard.add(
-        types.KeyboardButton("📂 My Files"),
-        types.KeyboardButton("🤖 Bot List")
-    )
-    keyboard.add(
-        types.KeyboardButton("👥 User List"),
-        types.KeyboardButton("👑 Admin Panel")
-    )
-    keyboard.add(
-        types.KeyboardButton("🔔 Notifications"),
-        types.KeyboardButton("⚙ Settings")
-    )
-    keyboard.add(
-        types.KeyboardButton("➕ Add User"),
-        types.KeyboardButton("👤 Owner Info")
-    )
-    keyboard.add(
-        types.KeyboardButton("✏️ Edit Contact Owner")
-    )
-    return keyboard
-
-def get_owner_keyboard():
-    keyboard = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
-    keyboard.add(
-        types.KeyboardButton("📂 My Files"),
-        types.KeyboardButton("🤖 Bot List")
-    )
-    keyboard.add(
-        types.KeyboardButton("👥 User List"),
-        types.KeyboardButton("👑 Admin Panel")
-    )
-    keyboard.add(
-        types.KeyboardButton("🔔 Notifications"),
-        types.KeyboardButton("⚙ Settings")
-    )
-    keyboard.add(
-        types.KeyboardButton("➕ Add User"),
-        types.KeyboardButton("👤 Owner Info")
-    )
-    keyboard.add(
-        types.KeyboardButton("✏️ Edit Contact Owner")
-    )
-    keyboard.add(
-        types.KeyboardButton("🔑 Change Owner Password"),
-        types.KeyboardButton("✏️ Change Owner Username")
-    )
-    return keyboard
-
-def clear_user_state(user_id):
-    if user_id in user_timers:
-        try:
-            user_timers[user_id].cancel()
-        except:
-            pass
-        del user_timers[user_id]
-    if user_id in user_states:
-        del user_states[user_id]
-    if user_id in owner_session:
-        del owner_session[user_id]
-
-def set_user_state(user_id, state_data):
-    clear_user_state(user_id)
-    user_states[user_id] = state_data
-    timer = threading.Timer(60.0, lambda: clear_user_state(user_id))
-    timer.daemon = True
-    user_timers[user_id] = timer
-    timer.start()
-
-def is_owner_authenticated(user_id):
-    return user_id in owner_session and owner_session[user_id].get('authenticated', False)
-
-@bot.message_handler(commands=['start', 'help'])
-def start_message(message):
-    user_id = message.from_user.id
-    clear_user_state(user_id)
-    ensure_default_users()
-    users = load_users()
-    
-    if user_id == OWNER_ID:
-        owner_session[user_id] = {'authenticated': True}
-        bot.reply_to(message, f"🤖 **Hosting Bot Control Panel**\n\n👤 Owner\n🤖 Bot: {BOT_USERNAME}", reply_markup=get_owner_keyboard(), parse_mode='Markdown')
-        return
-    
-    if is_owner_authenticated(user_id):
-        bot.reply_to(message, f"🤖 **Hosting Bot Control Panel**\n\n👤 Owner\n🤖 Bot: {BOT_USERNAME}", reply_markup=get_owner_keyboard(), parse_mode='Markdown')
-        return
-    
-    user_exists = False
-    username = None
-    for uname, info in users.items():
-        if str(user_id) == info.get('telegram_id', ''):
-            user_exists = True
-            username = uname
-            break
-    
-    if not user_exists:
-        bot.reply_to(message, "⚠️ You are not registered. Contact owner.", reply_markup=types.ReplyKeyboardRemove())
-        return
-    
-    role = users.get(username, {}).get('role', 'user')
-    if role == 'owner':
-        owner_session[user_id] = {'authenticated': True}
-        bot.reply_to(message, f"🤖 **Hosting Bot Control Panel**\n\n👤 Owner\n🤖 Bot: {BOT_USERNAME}", reply_markup=get_owner_keyboard(), parse_mode='Markdown')
-    else:
-        bot.reply_to(message, f"🤖 **Hosting Bot Control Panel**\n\n👤 User: `{username}`\n🤖 Bot: {BOT_USERNAME}", reply_markup=get_main_keyboard(), parse_mode='Markdown')
-
-@bot.message_handler(commands=['owner'])
-def owner_command(message):
-    user_id = message.from_user.id
-    
-    if is_owner_authenticated(user_id):
-        bot.reply_to(message, "✅ Already authenticated!", reply_markup=get_owner_keyboard())
-        return
-    
-    users = load_users()
-    is_owner_user = False
-    for uname, info in users.items():
-        if info.get('role') == 'owner' and str(user_id) == info.get('telegram_id', ''):
-            is_owner_user = True
-            break
-    
-    if is_owner_user or user_id == OWNER_ID:
-        owner_session[user_id] = {'authenticated': True}
-        bot.reply_to(message, "✅ Owner access granted!", reply_markup=get_owner_keyboard())
-        return
-    
-    msg = bot.reply_to(message, "🔑 **Enter Owner Password:**", parse_mode='Markdown', reply_markup=types.ReplyKeyboardRemove())
-    set_user_state(user_id, {'state': 'owner_password', 'message_id': msg.message_id})
-
-def process_owner_password(message):
-    user_id = message.from_user.id
-    password = message.text.strip()
-    
-    if password == OWNER_PASSWORD:
-        owner_session[user_id] = {'authenticated': True}
-        bot.reply_to(message, "✅ Owner access granted!", reply_markup=get_owner_keyboard())
-        clear_user_state(user_id)
-    else:
-        bot.reply_to(message, "❌ Wrong password!", reply_markup=get_main_keyboard())
-        clear_user_state(user_id)
-
-# ============================================================
-# HANDLER FUNCTIONS
-# ============================================================
-
-def my_files_handler(message):
-    user_id = message.from_user.id
-    users = load_users()
-    
-    if user_id == OWNER_ID or is_owner_authenticated(user_id):
-        username = "riyaj"
-    else:
-        username = None
-        for uname, info in users.items():
-            if str(user_id) == info.get('telegram_id', ''):
-                username = uname
-                break
+            # Get user files (excluding running files)
+            processes = load_processes()
+            running_ids = []
+            for file_id, info in processes.items():
+                if info.get('username') == username and is_process_running(info['pid']):
+                    running_ids.append(file_id)
+            
+            # Get files with token
+            token_files = []
+            for f in os.listdir(user_dir):
+                fpath = os.path.join(user_dir, f)
+                if os.path.isfile(fpath) and f.endswith('.py'):
+                    token, _ = detect_bot_token(fpath)
+                    if token:
+                        token_files.append(f)
+            
+            # Keep latest MAX_FILES_PER_USER files (excluding running + token files)
+            py_files = [f for f in os.listdir(user_dir) if f.endswith('.py') and f not in token_files]
+            py_files_with_time = []
+            for f in py_files:
+                fpath = os.path.join(user_dir, f)
+                if os.path.isfile(fpath):
+                    # Check if this file is running
+                    is_running = False
+                    for file_id in running_ids:
+                        if f.startswith(file_id):
+                            is_running = True
+                            break
+                    if not is_running:
+                        py_files_with_time.append((f, os.path.getmtime(fpath)))
+            
+            py_files_with_time.sort(key=lambda x: x[1], reverse=True)
+            
+            # Delete oldest files beyond limit
+            to_delete = py_files_with_time[MAX_FILES_PER_USER:]
+            for f, _ in to_delete:
+                fpath = os.path.join(user_dir, f)
+                if os.path.isfile(fpath):
+                    # Create backup before deleting
+                    backup_file_path = create_single_file_backup(fpath, f"pre_delete_{username}")
+                    send_telegram_message(OWNER_ID, f"🗑️ **File Deleted (Auto Cleanup)**\n\n"
+                                           f"👤 User: `{username}`\n"
+                                           f"📁 File: `{f}`\n"
+                                           f"💾 Backup: `{os.path.basename(backup_file_path)}`")
+                    os.remove(fpath)
+                    print(f"🗑️ Deleted old file: {f} from {username}")
         
-        if not username:
-            for uname, info in users.items():
-                if str(user_id) == uname:
-                    username = uname
-                    break
-    
-    if not username:
-        bot.reply_to(message, "⚠️ Not registered.", reply_markup=get_main_keyboard())
-        return
-    
-    user_files = get_user_files(username)
-    if not user_files:
-        bot.reply_to(message, f"📂 **No files for `{username}`**", parse_mode='Markdown', reply_markup=get_main_keyboard())
-        return
-    
-    response = f"📂 **Files for `{username}`:**\n\n"
-    for f in user_files:
-        status_icon = "🟢" if f['status'] == 'running' else "🔴"
-        bot_name = f" @{f['bot_username']}" if f.get('bot_username') else ""
-        response += f"{status_icon} `{f['filename']}` ({f['size']//1024} KB){bot_name}\n"
-    
-    bot.reply_to(message, response, parse_mode='Markdown', reply_markup=get_main_keyboard())
-
-def bot_list_handler(message):
-    all_files = get_all_files()
-    
-    bots = {}
-    for f in all_files:
-        if f.get('bot_username'):
-            if f['bot_username'] not in bots:
-                bots[f['bot_username']] = []
-            bots[f['bot_username']].append(f)
-    
-    if not bots:
-        bot.reply_to(message, "🤖 **No bots found**", parse_mode='Markdown', reply_markup=get_main_keyboard())
-        return
-    
-    response = "🤖 **All Bots:**\n\n"
-    for bot_username, files in bots.items():
-        response += f"🤖 @{bot_username} ({len(files)} files)\n"
-        for f in files:
-            status_icon = "🟢" if f['status'] == 'running' else "🔴"
-            response += f"  {status_icon} `{f['filename']}` (👤{f['owner']})\n"
-    
-    bot.reply_to(message, response, parse_mode='Markdown', reply_markup=get_main_keyboard())
-
-def user_list_handler(message):
-    user_id = message.from_user.id
-    users = load_users()
-    
-    if user_id == OWNER_ID or is_owner_authenticated(user_id):
-        user_list = users
-    else:
-        user_list = {u: info for u, info in users.items() if info.get('role') != 'owner'}
-    
-    if not user_list:
-        bot.reply_to(message, "👥 **No users found**", parse_mode='Markdown', reply_markup=get_main_keyboard())
-        return
-    
-    response = "👥 **User List:**\n\n"
-    for username, info in user_list.items():
-        role = info.get('role', 'user')
-        response += f"👤 `{username}` (🔑 `{info['password']}`)\n"
-    
-    bot.reply_to(message, response, parse_mode='Markdown', reply_markup=get_main_keyboard())
-
-def admin_panel_handler(message):
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        types.InlineKeyboardButton("👥 User List", callback_data='admin_userlist'),
-        types.InlineKeyboardButton("➕ Add User", callback_data='admin_adduser')
-    )
-    markup.add(
-        types.InlineKeyboardButton("👑 Admins List", callback_data='admin_adminslist'),
-        types.InlineKeyboardButton("➕ Add Admin", callback_data='admin_addadmin')
-    )
-    markup.add(types.InlineKeyboardButton("🔙 Back", callback_data='back_to_start'))
-    bot.reply_to(message, "👑 **Admin Panel**", parse_mode='Markdown', reply_markup=markup)
-
-def owner_info_handler(message):
-    users = load_users()
-    owner = users.get('riyaj', {'password': 'riyaj', 'role': 'owner'})
-    
-    response = "👑 **Owner Info**\n\n"
-    response += f"Username: `riyaj`\n"
-    response += f"Password: `{owner.get('password', 'riyaj')}`\n\n"
-    response += "⚠️ Keep this safe!"
-    
-    bot.reply_to(message, response, parse_mode='Markdown', reply_markup=get_main_keyboard())
-
-def add_user_handler(message):
-    user_id = message.from_user.id
-    clear_user_state(user_id)
-    
-    cancel_keyboard = types.ReplyKeyboardMarkup(row_width=1, resize_keyboard=True)
-    cancel_keyboard.add(types.KeyboardButton("❌ Cancel"))
-    
-    msg = bot.reply_to(message, "👤 **Enter username:**", parse_mode='Markdown', reply_markup=cancel_keyboard)
-    set_user_state(user_id, {'state': 'add_user_username', 'message_id': msg.message_id})
-
-def process_add_user_username(message):
-    user_id = message.from_user.id
-    text = message.text.strip()
-    
-    if text == "❌ Cancel" or text == "/cancel":
-        bot.reply_to(message, "❌ Cancelled", reply_markup=get_main_keyboard())
-        clear_user_state(user_id)
-        return
-    
-    if not text:
-        bot.reply_to(message, "❌ Invalid", reply_markup=get_main_keyboard())
-        clear_user_state(user_id)
-        return
-    
-    state = user_states.get(user_id, {})
-    state['username'] = text
-    state['state'] = 'add_user_password'
-    user_states[user_id] = state
-    
-    cancel_keyboard = types.ReplyKeyboardMarkup(row_width=1, resize_keyboard=True)
-    cancel_keyboard.add(types.KeyboardButton("❌ Cancel"))
-    
-    msg = bot.reply_to(message, f"🔑 **Password for `{text}`:**", parse_mode='Markdown', reply_markup=cancel_keyboard)
-    user_states[user_id]['message_id'] = msg.message_id
-
-def process_add_user_password(message):
-    user_id = message.from_user.id
-    state = user_states.get(user_id, {})
-    text = message.text.strip()
-    
-    if text == "❌ Cancel" or text == "/cancel":
-        bot.reply_to(message, "❌ Cancelled", reply_markup=get_main_keyboard())
-        clear_user_state(user_id)
-        return
-    
-    username = state.get('username')
-    password = text
-    
-    if not password or not username:
-        bot.reply_to(message, "❌ Invalid", reply_markup=get_main_keyboard())
-        clear_user_state(user_id)
-        return
-    
-    users = load_users()
-    if username in users:
-        bot.reply_to(message, f"⚠️ User `{username}` exists!", parse_mode='Markdown', reply_markup=get_main_keyboard())
-        clear_user_state(user_id)
-        return
-    
-    users[username] = {
-        'password': password,
-        'role': 'user',
-        'created': datetime.now().isoformat()
-    }
-    save_users(users)
-    
-    user_dir = os.path.join(UPLOAD_DIR, username)
-    os.makedirs(user_dir, exist_ok=True)
-    
-    bot.reply_to(message, f"✅ User `{username}` added!", parse_mode='Markdown', reply_markup=get_main_keyboard())
-    clear_user_state(user_id)
-
-def process_add_admin(message):
-    user_id = message.from_user.id
-    username = message.text.strip()
-    
-    if not username:
-        bot.reply_to(message, "❌ Invalid", reply_markup=get_main_keyboard())
-        clear_user_state(user_id)
-        return
-    
-    users = load_users()
-    if username not in users:
-        bot.reply_to(message, f"⚠️ User `{username}` not found!", parse_mode='Markdown', reply_markup=get_main_keyboard())
-        clear_user_state(user_id)
-        return
-    
-    if users[username].get('role') == 'admin':
-        bot.reply_to(message, f"⚠️ User `{username}` is already admin!", parse_mode='Markdown', reply_markup=get_main_keyboard())
-        clear_user_state(user_id)
-        return
-    
-    if users[username].get('role') == 'owner':
-        bot.reply_to(message, f"⚠️ User `{username}` is owner!", parse_mode='Markdown', reply_markup=get_main_keyboard())
-        clear_user_state(user_id)
-        return
-    
-    users[username]['role'] = 'admin'
-    save_users(users)
-    bot.reply_to(message, f"✅ User `{username}` promoted to admin!", parse_mode='Markdown', reply_markup=get_main_keyboard())
-    clear_user_state(user_id)
-
-def change_owner_username_handler(message):
-    msg = bot.reply_to(message, "✏️ **Send new owner username:**", parse_mode='Markdown', reply_markup=types.ReplyKeyboardRemove())
-    set_user_state(message.from_user.id, {'state': 'change_owner_username', 'message_id': msg.message_id})
-
-def change_owner_password_handler(message):
-    msg = bot.reply_to(message, "🔑 **Send new owner password:**", parse_mode='Markdown', reply_markup=types.ReplyKeyboardRemove())
-    set_user_state(message.from_user.id, {'state': 'change_owner_password', 'message_id': msg.message_id})
-
-def process_change_owner_username(message):
-    user_id = message.from_user.id
-    new_username = message.text.strip()
-    
-    if not new_username:
-        bot.reply_to(message, "❌ Invalid", reply_markup=get_main_keyboard())
-        clear_user_state(user_id)
-        return
-    
-    users = load_users()
-    
-    if new_username in users:
-        bot.reply_to(message, f"⚠️ Username `{new_username}` exists!", parse_mode='Markdown', reply_markup=get_main_keyboard())
-        clear_user_state(user_id)
-        return
-    
-    old_username = None
-    for uname, info in users.items():
-        if info.get('role') == 'owner':
-            old_username = uname
-            break
-    
-    if not old_username:
-        bot.reply_to(message, "❌ Owner not found!", reply_markup=get_main_keyboard())
-        clear_user_state(user_id)
-        return
-    
-    owner_password = users[old_username].get('password', 'riyaj')
-    owner_telegram_id = users[old_username].get('telegram_id', str(OWNER_ID))
-    owner_created = users[old_username].get('created', datetime.now().isoformat())
-    
-    users[new_username] = {
-        'password': owner_password,
-        'role': 'owner',
-        'created': owner_created,
-        'telegram_id': owner_telegram_id
-    }
-    del users[old_username]
-    save_users(users)
-    
-    old_dir = os.path.join(UPLOAD_DIR, old_username)
-    new_dir = os.path.join(UPLOAD_DIR, new_username)
-    if os.path.exists(old_dir):
-        os.rename(old_dir, new_dir)
-    
-    old_bot_dir = get_bot_user_dir(old_username)
-    new_bot_dir = get_bot_user_dir(new_username)
-    if os.path.exists(old_bot_dir):
-        os.rename(old_bot_dir, new_bot_dir)
-    
-    bot.reply_to(message, f"✅ Owner username changed to `{new_username}`!\n🔑 Password: `{owner_password}`", parse_mode='Markdown', reply_markup=get_main_keyboard())
-    clear_user_state(user_id)
-
-def process_change_owner_password(message):
-    user_id = message.from_user.id
-    new_password = message.text.strip()
-    
-    if not new_password:
-        bot.reply_to(message, "❌ Invalid", reply_markup=get_main_keyboard())
-        clear_user_state(user_id)
-        return
-    
-    users = load_users()
-    
-    owner_username = None
-    for uname, info in users.items():
-        if info.get('role') == 'owner':
-            owner_username = uname
-            break
-    
-    if not owner_username:
-        bot.reply_to(message, "❌ Owner not found!", reply_markup=get_main_keyboard())
-        clear_user_state(user_id)
-        return
-    
-    users[owner_username]['password'] = new_password
-    save_users(users)
-    
-    bot.reply_to(message, f"✅ Owner password changed!\n👤 Username: `{owner_username}`\n🔑 Password: `{new_password}`", parse_mode='Markdown', reply_markup=get_main_keyboard())
-    clear_user_state(user_id)
-
-@bot.message_handler(func=lambda message: True)
-def handle_text_messages(message):
-    user_id = message.from_user.id
-    text = message.text
-    
-    if user_id in user_states:
-        state = user_states[user_id].get('state')
-        if state == 'add_user_username':
-            process_add_user_username(message)
-            return
-        elif state == 'add_user_password':
-            process_add_user_password(message)
-            return
-        elif state == 'add_admin':
-            process_add_admin(message)
-            return
-        elif state == 'change_owner_username':
-            process_change_owner_username(message)
-            return
-        elif state == 'change_owner_password':
-            process_change_owner_password(message)
-            return
-        elif state == 'owner_password':
-            process_owner_password(message)
-            return
-    
-    clear_user_state(user_id)
-    
-    users = load_users()
-    is_owner = is_owner_authenticated(user_id) or user_id == OWNER_ID
-    
-    if not is_owner:
-        user_exists = False
-        for username, info in users.items():
-            if str(user_id) == info.get('telegram_id', ''):
-                user_exists = True
-                break
+        storage_after = get_storage_info()
+        send_telegram_message(OWNER_ID, f"✅ **Cleanup Complete**\n\n"
+                               f"Before: {storage['used_mb']:.1f}MB / {storage['max_mb']:.1f}MB ({storage['percent']:.1f}%)\n"
+                               f"After: {storage_after['used_mb']:.1f}MB / {storage_after['max_mb']:.1f}MB ({storage_after['percent']:.1f}%)")
         
-        if not user_exists:
-            bot.reply_to(message, "⚠️ Not registered.", reply_markup=types.ReplyKeyboardRemove())
-            return
-    
-    if text == "📂 My Files":
-        my_files_handler(message)
-    elif text == "🤖 Bot List":
-        bot_list_handler(message)
-    elif text == "👥 User List":
-        user_list_handler(message)
-    elif text == "👑 Admin Panel":
-        admin_panel_handler(message)
-    elif text == "👤 Owner Info":
-        owner_info_handler(message)
-    elif text == "➕ Add User":
-        add_user_handler(message)
-    elif text == "✏️ Change Owner Username" and is_owner:
-        change_owner_username_handler(message)
-    elif text == "🔑 Change Owner Password" and is_owner:
-        change_owner_password_handler(message)
-    else:
-        bot.reply_to(message, "❌ Unknown command. Use /start", reply_markup=get_main_keyboard())
+        return True
+    return False
 
-@bot.callback_query_handler(func=lambda call: True)
-def handle_callbacks(call):
-    user_id = call.from_user.id
-    data = call.data
+# ============================================================
+# BACKUP SYSTEM
+# ============================================================
+
+def create_backup(name_prefix=""):
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    backup_name = f"{name_prefix}_{timestamp}" if name_prefix else f"backup_{timestamp}"
+    backup_path = os.path.join(BACKUP_DIR, f"{backup_name}.zip")
     
-    if data == 'notif_on':
-        settings = load_settings()
-        settings['notifications_enabled'] = True
-        save_settings(settings)
-        bot.answer_callback_query(call.id, "🔔 ON")
-        bot.edit_message_text("✅ Notifications ON", call.message.chat.id, call.message.message_id, reply_markup=get_main_keyboard())
+    with zipfile.ZipFile(backup_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        # Backup uploads
+        if os.path.exists(UPLOAD_DIR):
+            for root, dirs, files in os.walk(UPLOAD_DIR):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    arcname = os.path.relpath(file_path, BASE_DIR)
+                    zipf.write(file_path, arcname)
+        
+        # Backup config files
+        config_files = [PROCESSES_FILE, USERS_FILE, SETTINGS_FILE]
+        for f in config_files:
+            if os.path.exists(f):
+                zipf.write(f, os.path.basename(f))
     
-    elif data == 'notif_off':
-        settings = load_settings()
-        settings['notifications_enabled'] = False
-        save_settings(settings)
-        bot.answer_callback_query(call.id, "🔕 OFF")
-        bot.edit_message_text("✅ Notifications OFF", call.message.chat.id, call.message.message_id, reply_markup=get_main_keyboard())
+    # Keep only last 10 backups
+    backups = sorted([f for f in os.listdir(BACKUP_DIR) if f.endswith('.zip')])
+    if len(backups) > 10:
+        for f in backups[:-10]:
+            os.remove(os.path.join(BACKUP_DIR, f))
     
-    elif data == 'admin_userlist':
-        users = load_users()
-        user_list = {u: info for u, info in users.items() if info.get('role') != 'owner'}
-        response = "👥 **Users:**\n\n"
-        for username, info in user_list.items():
-            response += f"👤 `{username}` (🔑 `{info['password']}`)\n"
-        markup = types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("🔙 Back", callback_data='admin_panel'))
-        bot.edit_message_text(response, call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=markup)
-        bot.answer_callback_query(call.id)
+    print(f"✅ Backup created: {backup_path}")
+    return backup_path
+
+def create_single_file_backup(filepath, name_prefix=""):
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    filename = os.path.basename(filepath)
+    backup_name = f"{name_prefix}_{filename}_{timestamp}.zip" if name_prefix else f"{filename}_{timestamp}.zip"
+    backup_path = os.path.join(BACKUP_DIR, backup_name)
     
-    elif data == 'admin_adduser':
-        bot.edit_message_text("➕ **Add User**\n\nSend username:", call.message.chat.id, call.message.message_id, parse_mode='Markdown')
-        set_user_state(user_id, {'state': 'add_user_username'})
-        bot.answer_callback_query(call.id)
+    with zipfile.ZipFile(backup_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        zipf.write(filepath, filename)
     
-    elif data == 'admin_adminslist':
-        users = load_users()
-        admin_list = {u: info for u, info in users.items() if info.get('role') in ['admin', 'owner']}
-        response = "👑 **Admins:**\n\n"
-        for username, info in admin_list.items():
-            if username == 'riyaj':
-                response += f"👑 {username} (Owner)\n"
-            else:
-                response += f"🛡️ `{username}` (🔑 `{info['password']}`)\n"
-        markup = types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("🔙 Back", callback_data='admin_panel'))
-        bot.edit_message_text(response, call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=markup)
-        bot.answer_callback_query(call.id)
+    return backup_path
+
+def send_backup_to_telegram(backup_path, message=""):
+    try:
+        with open(backup_path, 'rb') as f:
+            bot.send_document(OWNER_ID, f, caption=message or f"📦 **Backup Created**\n\n`{os.path.basename(backup_path)}`")
+        return True
+    except Exception as e:
+        print(f"Error sending backup: {e}")
+        return False
+
+def auto_backup():
+    print("🔄 Auto backup started...")
+    backup_path = create_backup("auto_backup")
+    storage = get_storage_info()
+    message = f"📦 **Auto Backup**\n\n"
+    message += f"📁 Backup: `{os.path.basename(backup_path)}`\n"
+    message += f"💾 Storage: {storage['used_mb']:.1f}MB / {storage['max_mb']:.1f}MB ({storage['percent']:.1f}%)\n"
+    message += f"📄 Files: {storage['files']}\n"
+    message += f"🕐 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
     
-    elif data == 'admin_addadmin':
-        bot.edit_message_text("➕ **Add Admin**\n\nSend username:", call.message.chat.id, call.message.message_id, parse_mode='Markdown')
-        set_user_state(user_id, {'state': 'add_admin'})
-        bot.answer_callback_query(call.id)
+    send_telegram_message(OWNER_ID, message)
+    send_backup_to_telegram(backup_path, "📦 Auto Backup File")
+    print("✅ Auto backup completed")
+
+def auto_backup_scheduler():
+    while True:
+        schedule.run_pending()
+        time.sleep(60)
+
+def restore_backup(backup_name=None):
+    if backup_name:
+        backup_path = os.path.join(BACKUP_DIR, backup_name)
+        if not os.path.exists(backup_path):
+            return False, f"Backup not found: {backup_name}"
+    else:
+        # Get latest backup
+        backups = sorted([f for f in os.listdir(BACKUP_DIR) if f.endswith('.zip')])
+        if not backups:
+            return False, "No backups found"
+        backup_path = os.path.join(BACKUP_DIR, backups[-1])
     
-    elif data == 'admin_panel':
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        markup.add(
-            types.InlineKeyboardButton("👥 User List", callback_data='admin_userlist'),
-            types.InlineKeyboardButton("➕ Add User", callback_data='admin_adduser')
-        )
-        markup.add(
-            types.InlineKeyboardButton("👑 Admins List", callback_data='admin_adminslist'),
-            types.InlineKeyboardButton("➕ Add Admin", callback_data='admin_addadmin')
-        )
-        markup.add(types.InlineKeyboardButton("🔙 Back", callback_data='back_to_start'))
-        bot.edit_message_text("👑 **Admin Panel**", call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=markup)
-        bot.answer_callback_query(call.id)
-    
-    elif data == 'back_to_start':
-        bot.edit_message_text("🏠 **Main Menu**\nUse /start", call.message.chat.id, call.message.message_id, reply_markup=get_main_keyboard())
-        bot.answer_callback_query(call.id)
+    try:
+        # Stop all processes first
+        processes = load_processes()
+        for file_id, info in processes.items():
+            kill_process(info['pid'])
+        save_processes({})
+        
+        # Restore files
+        with zipfile.ZipFile(backup_path, 'r') as zipf:
+            for member in zipf.namelist():
+                if member.startswith('uploads/') or member.endswith('.json'):
+                    zipf.extract(member, BASE_DIR)
+        
+        return True, f"Restored from: {os.path.basename(backup_path)}"
+    except Exception as e:
+        return False, f"Restore failed: {e}"
+
+def backup_before_delete(filepath):
+    backup_path = create_single_file_backup(filepath, "pre_delete")
+    filename = os.path.basename(filepath)
+    send_telegram_message(OWNER_ID, f"💾 **Pre-Delete Backup**\n\n"
+                           f"📁 File: `{filename}`\n"
+                           f"📦 Backup: `{os.path.basename(backup_path)}`\n"
+                           f"🕐 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    return backup_path
 
 # ============================================================
 # SETTINGS MANAGEMENT
@@ -1043,7 +329,8 @@ def load_settings():
         "telegram_popup": True,
         "telegram_link": "https://t.me/+m0R5z1yhmCtiZjQ9",
         "notifications_enabled": True,
-        "popup_shown": {}
+        "popup_shown": {},
+        "last_backup": None
     }
 
 def save_settings(settings):
@@ -1073,7 +360,7 @@ def get_default_users():
             "password": "riyaj",
             "role": "owner",
             "created": datetime.now().isoformat(),
-            "telegram_id": str(OWNER_ID)
+            "telegram_id": ""
         }
     }
 
@@ -1090,21 +377,9 @@ def ensure_default_users():
             if users[username].get('role') != 'owner':
                 users[username]['role'] = 'owner'
                 changed = True
-            if users[username].get('telegram_id') != str(OWNER_ID):
-                users[username]['telegram_id'] = str(OWNER_ID)
-                changed = True
-            if users[username].get('password') != info.get('password'):
-                users[username]['password'] = info.get('password')
-                changed = True
-    
-    for username in list(users.keys()):
-        if username != "riyaj" and users[username].get('role') == 'owner':
-            users[username]['role'] = 'user'
-            changed = True
     
     if changed:
         save_users(users)
-        print(f"✅ Users updated: {users}")
     return users
 
 # ============================================================
@@ -1178,20 +453,70 @@ def send_bot_notification(message_type, username, filename, file_id, pid=None, e
         return True
         
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
     display_bot = f"@{bot_username}" if bot_username else BOT_USERNAME
     
-    messages = {
-        'installing': f"🔄 **Installing deps**\n📦 `{', '.join(requirements) if requirements else 'None'}`\n👤 User: `{username}`\n📁 File: `{filename}`\n🤖 Bot: {display_bot}\n📅 Time: {timestamp}",
-        'installed': f"✅ **Deps installed**\n📦 `{', '.join(requirements) if requirements else 'None'}`\n👤 User: `{username}`\n📁 File: `{filename}`\n🤖 Bot: {display_bot}\n📅 Time: {timestamp}",
-        'running': f"🚀 **File running**\n📁 File: `{filename}`\n👤 User: `{username}`\n🆔 PID: `{pid}`\n🤖 Bot: {display_bot}\n📅 Time: {timestamp}",
-        'error': f"❌ **Error in `{filename}`**\n👤 User: `{username}`\n🤖 Bot: {display_bot}\n\n```\n{(traceback_full or error)[:1500]}\n```\n📅 Time: {timestamp}",
-        'module_installing': f"🐍 **Installing `{module_name}`**\n👤 User: `{username}`\n📁 File: `{filename}`\n🤖 Bot: {display_bot}\n📅 Time: {timestamp}",
-        'module_installed': f"✅ **Installed `{module_name}`**\n👤 User: `{username}`\n📁 File: `{filename}`\n🤖 Bot: {display_bot}\n📅 Time: {timestamp}",
-        'retrying': f"🔄 **Retrying `{filename}`**\n👤 User: `{username}`\n🤖 Bot: {display_bot}\n📅 Time: {timestamp}"
-    }
-    
-    text = messages.get(message_type)
-    if not text:
+    if message_type == 'installing':
+        text = (
+            f"🔄 **Installing Python deps from `requirements.txt`**\n\n"
+            f"📦 `{', '.join(requirements) if requirements else 'None'}`\n"
+            f"👤 User: `{username}`\n"
+            f"📁 File: `{filename}`\n"
+            f"🤖 Bot: {display_bot}\n"
+            f"📅 Time: {timestamp}"
+        )
+    elif message_type == 'installed':
+        text = (
+            f"✅ **Python deps from `requirements.txt` installed.**\n\n"
+            f"📦 `{', '.join(requirements) if requirements else 'None'}`\n"
+            f"👤 User: `{username}`\n"
+            f"📁 File: `{filename}`\n"
+            f"🤖 Bot: {display_bot}\n"
+            f"📅 Time: {timestamp}"
+        )
+    elif message_type == 'running':
+        text = (
+            f"🚀 **File is running**\n\n"
+            f"📁 File: `{filename}`\n"
+            f"👤 User: `{username}`\n"
+            f"🆔 PID: `{pid}`\n"
+            f"🤖 Bot: {display_bot}\n"
+            f"📅 Time: {timestamp}"
+        )
+    elif message_type == 'error':
+        text = (
+            f"❌ **Error in script pre-check for `{filename}`**\n\n"
+            f"👤 User: `{username}`\n"
+            f"📁 File: `{filename}`\n"
+            f"🤖 Bot: {display_bot}\n\n"
+            f"```\n{(traceback_full or error)[:1500]}\n```\n\n"
+            f"📅 Time: {timestamp}"
+        )
+    elif message_type == 'module_installing':
+        text = (
+            f"🐍 **Module `{module_name}` not found. Installing `{module_name}`...**\n\n"
+            f"👤 User: `{username}`\n"
+            f"📁 File: `{filename}`\n"
+            f"🤖 Bot: {display_bot}\n"
+            f"📅 Time: {timestamp}"
+        )
+    elif message_type == 'module_installed':
+        text = (
+            f"✅ **Package `{module_name}` (for `{module_name}`) installed.**\n\n"
+            f"👤 User: `{username}`\n"
+            f"📁 File: `{filename}`\n"
+            f"🤖 Bot: {display_bot}\n"
+            f"📅 Time: {timestamp}"
+        )
+    elif message_type == 'retrying':
+        text = (
+            f"🔄 **Install successful. Retrying `{filename}`...**\n\n"
+            f"👤 User: `{username}`\n"
+            f"📁 File: `{filename}`\n"
+            f"🤖 Bot: {display_bot}\n"
+            f"📅 Time: {timestamp}"
+        )
+    else:
         return False
     
     return send_telegram_message(OWNER_ID, text)
@@ -1379,12 +704,12 @@ def detect_bot_token(filepath):
                 if resp.status_code == 200:
                     data = resp.json()
                     if data.get('ok'):
-                        return True, data['result'].get('username')
+                        return token, data['result'].get('username')
             except:
                 pass
-        return False, None
+        return None, None
     except:
-        return False, None
+        return None, None
 
 # ============================================================
 # INSTALL MISSING MODULE
@@ -1624,7 +949,9 @@ def get_user_files(username):
                 bot_username = None
                 token = None
                 if fname.endswith('.py'):
-                    has_token, bot_username = detect_bot_token(fpath)
+                    token, bot_username = detect_bot_token(fpath)
+                    if token:
+                        has_token = True
                 
                 files.append({
                     'id': file_id,
@@ -1794,18 +1121,6 @@ def get_terminal_session(session_id):
 @app.route('/')
 def index():
     return render_template_string(HTML_TEMPLATE)
-
-@app.route('/keep-alive')
-def keep_alive():
-    """Cron-job ke liye keep-alive + restore processes"""
-    restored = restore_all_processes()
-    stats = get_storage_stats()
-    return jsonify({
-        'status': 'alive',
-        'timestamp': datetime.now().isoformat(),
-        'processes_restored': restored,
-        'storage': stats
-    })
 
 @app.route('/api/login', methods=['POST'])
 def login():
@@ -2066,6 +1381,64 @@ def popup_shown(username):
     save_settings(settings)
     return jsonify({'message': 'Popup status updated'})
 
+@app.route('/api/storage')
+@require_auth
+def get_storage(username):
+    storage = get_storage_info()
+    return jsonify({'storage': storage})
+
+@app.route('/api/backup/create', methods=['POST'])
+@require_owner
+def create_backup_route(username):
+    try:
+        backup_path = create_backup("manual")
+        storage = get_storage_info()
+        message = f"📦 **Manual Backup Created**\n\n"
+        message += f"📁 Backup: `{os.path.basename(backup_path)}`\n"
+        message += f"💾 Storage: {storage['used_mb']:.1f}MB / {storage['max_mb']:.1f}MB ({storage['percent']:.1f}%)\n"
+        message += f"🕐 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        
+        # Send to Telegram
+        send_telegram_message(OWNER_ID, message)
+        send_backup_to_telegram(backup_path, "📦 Manual Backup File")
+        
+        return jsonify({
+            'message': 'Backup created',
+            'backup': os.path.basename(backup_path)
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/backup/list')
+@require_owner
+def list_backups(username):
+    backups = sorted([f for f in os.listdir(BACKUP_DIR) if f.endswith('.zip')], reverse=True)
+    backup_list = []
+    for b in backups:
+        bpath = os.path.join(BACKUP_DIR, b)
+        backup_list.append({
+            'name': b,
+            'size': os.path.getsize(bpath),
+            'size_mb': os.path.getsize(bpath) / (1024 * 1024),
+            'created': datetime.fromtimestamp(os.path.getctime(bpath)).isoformat()
+        })
+    return jsonify({'backups': backup_list})
+
+@app.route('/api/backup/restore/<backup_name>', methods=['POST'])
+@require_owner
+def restore_backup_route(username, backup_name):
+    try:
+        success, message = restore_backup(backup_name)
+        if success:
+            send_telegram_message(OWNER_ID, f"🔄 **Backup Restored**\n\n"
+                                   f"📁 Backup: `{backup_name}`\n"
+                                   f"🕐 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            return jsonify({'message': message})
+        else:
+            return jsonify({'error': message}), 400
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/api/files')
 @require_auth
 def get_user_files_route(username):
@@ -2078,12 +1451,6 @@ def get_all_files_route(username):
     files = get_all_files()
     return jsonify({'files': files})
 
-@app.route('/api/storage-stats')
-@require_auth
-def get_storage_stats_route(username):
-    stats = get_storage_stats()
-    return jsonify({'storage': stats})
-
 @app.route('/api/upload', methods=['POST'])
 @require_auth
 def upload_file(username):
@@ -2094,15 +1461,16 @@ def upload_file(username):
     if len(files) == 0:
         return jsonify({'error': 'No files selected'}), 400
 
-    # Check storage before upload
-    for f in files:
-        f.seek(0, os.SEEK_END)
-        file_size = f.tell()
-        f.seek(0)
-        if not check_storage_available(file_size):
-            auto_cleanup_if_needed()
-            if not check_storage_available(file_size):
-                return jsonify({'error': f'Storage full! Max {MAX_STORAGE_MB}MB. Cleanup old files first.'}), 400
+    # Check storage
+    storage = get_storage_info()
+    if storage['percent'] >= STORAGE_WARNING_PERCENT:
+        check_and_cleanup()
+        storage = get_storage_info()
+        
+        if storage['percent'] >= STORAGE_WARNING_PERCENT:
+            send_telegram_message(OWNER_ID, f"⚠️ **Storage Warning**\n\n"
+                                   f"Storage: {storage['used_mb']:.1f}MB / {storage['max_mb']:.1f}MB ({storage['percent']:.1f}%)\n"
+                                   f"Cleanup required!")
 
     user_dir = get_user_dir(username)
     bot_user_dir = get_bot_user_dir(username)
@@ -2153,7 +1521,6 @@ def upload_file(username):
     if not uploaded_any:
         return jsonify({'error': 'No files uploaded'}), 400
 
-    # Find main Python file
     for fname in os.listdir(user_dir):
         if fname.endswith('.py') and fname.startswith(file_id):
             base = fname[len(file_id)+1:]
@@ -2179,8 +1546,6 @@ def upload_file(username):
 
     pid = run_file(main_py, file_id, os.path.basename(main_py), username, cwd=user_dir)
 
-    auto_cleanup_if_needed()
-
     return jsonify({
         'message': 'Upload successful',
         'file_id': file_id,
@@ -2200,10 +1565,10 @@ def deploy_code(username):
     if not code:
         return jsonify({'error': 'No code provided'}), 400
     
-    if not check_storage_available(len(code.encode('utf-8'))):
-        auto_cleanup_if_needed()
-        if not check_storage_available(len(code.encode('utf-8'))):
-            return jsonify({'error': f'Storage full! Max {MAX_STORAGE_MB}MB.'}), 400
+    # Check storage
+    storage = get_storage_info()
+    if storage['percent'] >= STORAGE_WARNING_PERCENT:
+        check_and_cleanup()
     
     user_dir = get_user_dir(username)
     bot_user_dir = get_bot_user_dir(username)
@@ -2225,8 +1590,6 @@ def deploy_code(username):
     shutil.copy(filepath, bot_filepath)
     
     pid = run_file(filepath, file_id, filename, username, cwd=user_dir)
-    
-    auto_cleanup_if_needed()
     
     return jsonify({
         'message': 'Code deployed',
@@ -2281,6 +1644,17 @@ def stop_file_route(username, file_id):
 @app.route('/api/files/delete/<file_id>', methods=['DELETE'])
 @require_auth
 def delete_file_route(username, file_id):
+    # Create backup before deletion
+    user_dir = get_user_dir(username)
+    file_to_delete = None
+    for fname in os.listdir(user_dir):
+        if fname.startswith(file_id):
+            file_to_delete = os.path.join(user_dir, fname)
+            break
+    
+    if file_to_delete and os.path.isfile(file_to_delete):
+        backup_before_delete(file_to_delete)
+    
     stop_file_process(file_id)
     
     processes = load_processes()
@@ -2288,7 +1662,6 @@ def delete_file_route(username, file_id):
         del processes[file_id]
         save_processes(processes)
     
-    user_dir = get_user_dir(username)
     bot_user_dir = get_bot_user_dir(username)
     
     deleted = False
@@ -2487,6 +1860,9 @@ def update_file_content(username, file_id):
         if fname.startswith(file_id):
             fpath = os.path.join(user_dir, fname)
             if os.path.isfile(fpath):
+                # Create backup before editing
+                backup_before_delete(fpath)
+                
                 with open(fpath, 'w', encoding='utf-8') as f:
                     f.write(content)
                 bot_fpath = os.path.join(bot_user_dir, fname)
@@ -2583,7 +1959,7 @@ def file_details(username, file_id):
             fpath = os.path.join(user_dir, fname)
             if os.path.isfile(fpath):
                 stat = os.stat(fpath)
-                has_token, bot_username = detect_bot_token(fpath)
+                token, bot_username = detect_bot_token(fpath)
                 return jsonify({
                     'details': {
                         'filename': fname,
@@ -2592,7 +1968,7 @@ def file_details(username, file_id):
                         'modified': datetime.fromtimestamp(stat.st_mtime).isoformat(),
                         'path': fpath,
                         'owner': username,
-                        'has_token': has_token,
+                        'has_token': bool(token),
                         'bot_username': bot_username
                     }
                 })
@@ -2606,9 +1982,9 @@ def get_bot_info(username, file_id):
         if fname.startswith(file_id):
             fpath = os.path.join(user_dir, fname)
             if os.path.isfile(fpath):
-                has_token, bot_username = detect_bot_token(fpath)
+                token, bot_username = detect_bot_token(fpath)
                 return jsonify({
-                    'has_token': has_token,
+                    'has_token': bool(token),
                     'bot_username': bot_username
                 })
     
@@ -2620,9 +1996,9 @@ def get_bot_info(username, file_id):
                 if fname.startswith(file_id):
                     fpath = os.path.join(user_dir, fname)
                     if os.path.isfile(fpath):
-                        has_token, bot_username = detect_bot_token(fpath)
+                        token, bot_username = detect_bot_token(fpath)
                         return jsonify({
-                            'has_token': has_token,
+                            'has_token': bool(token),
                             'bot_username': bot_username
                         })
     
@@ -2672,7 +2048,9 @@ def folder_list(username):
         has_token = False
         bot_username = None
         if not is_dir and item.endswith('.py'):
-            has_token, bot_username = detect_bot_token(item_path)
+            token, bot_username = detect_bot_token(item_path)
+            if token:
+                has_token = True
         
         items.append({
             'name': item,
@@ -2785,6 +2163,8 @@ def folder_delete(username):
     if os.path.isdir(real_path):
         shutil.rmtree(real_path)
     else:
+        # Create backup before deleting
+        backup_before_delete(real_path)
         os.remove(real_path)
     
     return jsonify({'message': 'Deleted successfully'})
@@ -2861,6 +2241,7 @@ def terminal_command(username):
 def terminal_output(username, session_id):
     def generate():
         session = get_terminal_session(session_id)
+        last_output = ''
         
         while True:
             if not session.running:
@@ -2898,6 +2279,8 @@ def get_stats(username):
     users = load_users()
     user_role = users[username]['role']
     
+    storage = get_storage_info()
+    
     if user_role == 'owner':
         all_files = get_all_files()
         running = sum(1 for f in all_files if f['status'] == 'running')
@@ -2906,7 +2289,8 @@ def get_stats(username):
             'total_users': len(users),
             'total_files': len(all_files),
             'running': running,
-            'stopped': stopped
+            'stopped': stopped,
+            'storage': storage
         })
     else:
         user_files = get_user_files(username)
@@ -2916,15 +2300,22 @@ def get_stats(username):
             'total_users': 1,
             'total_files': len(user_files),
             'running': running,
-            'stopped': stopped
+            'stopped': stopped,
+            'storage': storage
         })
 
 @app.route('/health')
 def health():
+    storage = get_storage_info()
     return jsonify({
         'status': 'healthy',
         'service': 'PYTHON HOSTING - Render',
-        'timestamp': datetime.now().isoformat()
+        'timestamp': datetime.now().isoformat(),
+        'storage': {
+            'used_mb': storage['used_mb'],
+            'max_mb': storage['max_mb'],
+            'percent': storage['percent']
+        }
     })
 
 @app.errorhandler(404)
@@ -2936,7 +2327,7 @@ def internal_error(e):
     return jsonify({'error': 'Internal server error'}), 500
 
 # ============================================================
-# HTML TEMPLATE (Same as before - Use your existing HTML)
+# HTML TEMPLATE (truncated for brevity - full version in original)
 # ============================================================
 
 HTML_TEMPLATE = '''
@@ -2949,13 +2340,34 @@ HTML_TEMPLATE = '''
     <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { background: #050807; color: #00ff88; font-family: 'Orbitron', 'Courier New', monospace; display: flex; justify-content: center; align-items: flex-start; min-height: 100vh; padding: 20px 10px; }
-        .auth-container { border: 1.5px solid rgba(0,255,136,0.15); padding: 35px 30px 30px; width: 400px; background: rgba(5,8,7,0.9); text-align: center; border-radius: 12px; margin-top: 50px; }
+        body { 
+            background: #050807; 
+            color: #00ff88; 
+            font-family: 'Orbitron', 'Courier New', monospace; 
+            display: flex; 
+            justify-content: center; 
+            align-items: flex-start; 
+            min-height: 100vh; 
+            padding: 20px 10px;
+            background-image: radial-gradient(circle at 20% 30%, rgba(0,255,136,0.03) 0%, transparent 60%);
+        }
+        .auth-container { 
+            border: 1.5px solid rgba(0,255,136,0.15); 
+            padding: 35px 30px 30px; 
+            width: 400px; 
+            background: rgba(5,8,7,0.9); 
+            text-align: center; 
+            border-radius: 12px;
+            box-shadow: 0 8px 40px rgba(0,0,0,0.8);
+            margin-top: 50px;
+        }
         .auth-container .brand h1 { font-size: 1.6rem; font-weight: 700; color: #00ff88; letter-spacing: 3px; text-transform: uppercase; }
         .auth-container .brand .highlight { color: #33ddff; }
+        .auth-container .brand .sub { font-size: 0.6rem; letter-spacing: 5px; opacity: 0.3; margin-top: 4px; text-transform: uppercase; }
         .auth-container .divider { height: 1px; background: linear-gradient(90deg, transparent, rgba(0,255,136,0.15), transparent); margin: 16px 0 20px 0; }
+        .auth-container h2 { font-size: 0.7rem; letter-spacing: 4px; opacity: 0.4; font-weight: 400; margin-bottom: 18px; text-transform: uppercase; }
         .auth-container .input-group { text-align: left; margin-bottom: 14px; }
-        .auth-container .input-group label { display: block; font-size: 0.65rem; opacity: 0.5; margin-bottom: 4px; text-transform: uppercase; }
+        .auth-container .input-group label { display: block; font-size: 0.65rem; letter-spacing: 2px; opacity: 0.5; margin-bottom: 4px; text-transform: uppercase; }
         .auth-container .input-group input { width: 100%; background: rgba(0,0,0,0.6); border: 1.5px solid rgba(0,255,136,0.12); color: #00ff88; padding: 12px 14px; border-radius: 8px; outline: none; font-family: 'Orbitron', 'Courier New', monospace; font-size: 0.85rem; }
         .auth-container .input-group input:focus { border-color: rgba(0,255,136,0.4); }
         .auth-container .btn-primary { width: 100%; padding: 14px; margin-top: 8px; cursor: pointer; border: 1.5px solid rgba(0,255,136,0.3); background: rgba(0,255,136,0.04); color: #00ff88; font-weight: 700; font-family: 'Orbitron', 'Courier New', monospace; font-size: 0.85rem; border-radius: 8px; transition: all 0.2s ease; letter-spacing: 2px; text-transform: uppercase; }
@@ -2964,51 +2376,38 @@ HTML_TEMPLATE = '''
         .auth-container .btn-secondary:hover { background: #ffffff; color: #000; border-color: #ffffff; }
         .auth-container .login-error { color: #ff4466; font-size: 0.7rem; margin-top: 8px; display: none; }
         .auth-container .login-error.show { display: block; }
-        .toast { position: fixed; top: 25px; left: 50%; transform: translateX(-50%) translateY(-120px); background: rgba(0,255,136,0.06); border: 1.5px solid rgba(0,255,136,0.25); color: #00ff88; padding: 16px 32px; border-radius: 12px; z-index: 9999; backdrop-filter: blur(16px); transition: all 0.5s; opacity: 0; pointer-events: none; text-align: center; min-width: 280px; }
+        .auth-container .contact-btn { margin-top: 10px; background: rgba(255,255,255,0.05); border-color: rgba(255,255,255,0.2); }
+        .auth-container .contact-btn:hover { background: #ffffff; color: #000; border-color: #ffffff; }
+        .toast { position: fixed; top: 25px; left: 50%; transform: translateX(-50%) translateY(-120px); background: rgba(0,255,136,0.06); border: 1.5px solid rgba(0,255,136,0.25); color: #00ff88; padding: 16px 32px; border-radius: 12px; font-family: 'Orbitron', 'Courier New', monospace; font-size: 0.85rem; z-index: 9999; backdrop-filter: blur(16px); transition: all 0.5s cubic-bezier(0.22, 1, 0.36, 1); opacity: 0; pointer-events: none; text-align: center; min-width: 280px; }
         .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
         .toast.error { border-color: rgba(255,51,85,0.35); color: #ff4466; background: rgba(255,51,85,0.06); }
-        .dashboard-btn { background: rgba(0,255,136,0.08); border: 1.5px solid rgba(0,255,136,0.3); color: #00ff88; padding: 12px 14px; cursor: pointer; text-align: center; font-weight: 600; font-family: 'Orbitron', 'Courier New', monospace; font-size: 0.7rem; transition: all 0.15s ease; border-radius: 8px; letter-spacing: 0.5px; width: 100%; }
+        .dashboard-btn { background: rgba(0, 255, 136, 0.08); border: 1.5px solid rgba(0, 255, 136, 0.3); color: #00ff88; padding: 12px 14px; cursor: pointer; text-align: center; font-weight: 600; font-family: 'Orbitron', 'Courier New', monospace; font-size: 0.7rem; transition: all 0.15s ease; border-radius: 8px; letter-spacing: 0.5px; width: 100%; }
         .dashboard-btn:hover { background: #00ff88; color: #000; border-color: #00ff88; }
-        .dashboard-btn.red { border-color: rgba(255,51,85,0.4); color: #ff3355; }
+        .dashboard-btn.red { border-color: rgba(255, 51, 85, 0.4); color: #ff3355; }
         .dashboard-btn.red:hover { background: #ff3355; color: #000; }
-        .dashboard-btn.blue { border-color: rgba(51,221,255,0.4); color: #33ddff; }
+        .dashboard-btn.blue { border-color: rgba(51, 221, 255, 0.4); color: #33ddff; }
         .dashboard-btn.blue:hover { background: #33ddff; color: #000; }
-        .dashboard-btn.green { border-color: rgba(0,255,136,0.4); color: #00ff88; }
+        .dashboard-btn.green { border-color: rgba(0, 255, 136, 0.4); color: #00ff88; }
         .dashboard-btn.green:hover { background: #00ff88; color: #000; }
-        .box { border: 1px solid rgba(0,255,136,0.15); padding: 16px 14px; margin-bottom: 14px; background: #0a100e; border-radius: 10px; max-width: 520px; margin-left: auto; margin-right: auto; }
+        .dashboard-btn.orange { border-color: rgba(255, 170, 51, 0.4); color: #ffaa33; }
+        .dashboard-btn.orange:hover { background: #ffaa33; color: #000; }
+        .dashboard-btn.purple { border-color: rgba(187, 136, 255, 0.4); color: #bb88ff; }
+        .dashboard-btn.purple:hover { background: #bb88ff; color: #000; }
+        .dashboard-btn.white { border-color: rgba(255,255,255,0.4); color: #ffffff; background: rgba(255,255,255,0.05); }
+        .dashboard-btn.white:hover { background: #ffffff; color: #000; }
+        .p-small { font-size: 0.6rem; opacity: 0.4; margin: 4px 0 2px 0; letter-spacing: 1px; }
+        .box { border: 1px solid rgba(0, 255, 136, 0.15); padding: 16px 14px; margin-bottom: 14px; background: #0a100e; border-radius: 10px; max-width: 520px; margin-left: auto; margin-right: auto; }
         .box h2 { font-size: 0.7rem; margin: 0 0 10px 0; color: #00ff88; letter-spacing: 3px; text-transform: uppercase; opacity: 0.8; font-weight: 500; }
         .stat-grid { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 8px; margin-bottom: 12px; }
-        .stat-box { border: 1px solid rgba(0,255,136,0.1); padding: 10px 4px; text-align: center; background: rgba(0,255,136,0.03); border-radius: 8px; }
+        .stat-box { border: 1px solid rgba(0, 255, 136, 0.1); padding: 10px 4px; text-align: center; background: rgba(0, 255, 136, 0.03); border-radius: 8px; }
         .stat-num { font-size: 1.5rem; font-weight: 700; display: block; line-height: 1.3; color: #00ff88; }
         .stat-label { font-size: 0.45rem; letter-spacing: 1px; opacity: 0.4; text-transform: uppercase; }
-        input, textarea { width: 100%; background: rgba(0,0,0,0.6); border: 1.5px solid rgba(0,255,136,0.15); color: #00ff88; padding: 10px 12px; margin: 4px 0; font-family: 'Orbitron', 'Courier New', monospace; font-size: 0.7rem; border-radius: 8px; outline: none; }
+        .storage-bar { width: 100%; height: 6px; background: rgba(0,255,136,0.08); border-radius: 3px; overflow: hidden; margin: 8px 0; }
+        .storage-bar .fill { height: 100%; background: linear-gradient(90deg, #00ff88, #33ddff); border-radius: 3px; transition: width 0.5s ease; }
+        .storage-bar .fill.warning { background: linear-gradient(90deg, #ffaa33, #ff4466); }
+        input, textarea, select { width: 100%; background: rgba(0,0,0,0.6); border: 1.5px solid rgba(0, 255, 136, 0.15); color: #00ff88; padding: 10px 12px; margin: 4px 0; font-family: 'Orbitron', 'Courier New', monospace; font-size: 0.7rem; border-radius: 8px; outline: none; }
+        input:focus, textarea:focus, select:focus { border-color: rgba(0, 255, 136, 0.5); }
         textarea { resize: vertical; min-height: 100px; }
-        .file-item { display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; margin: 3px 0; border: 1px solid rgba(0,255,136,0.06); border-radius: 6px; background: rgba(0,0,0,0.2); flex-wrap: wrap; gap: 4px; }
-        .file-item .file-info { display: flex; align-items: center; gap: 8px; font-size: 0.7rem; flex-wrap: wrap; }
-        .file-item .file-info .name { color: #00ff88; }
-        .file-item .file-actions { display: flex; gap: 4px; flex-wrap: wrap; }
-        .file-item .file-actions .btn-sm { padding: 2px 8px; font-size: 0.45rem; border: 1px solid rgba(0,255,136,0.15); border-radius: 4px; background: transparent; color: #00ff88; cursor: pointer; font-family: 'Orbitron', 'Courier New', monospace; }
-        .file-item .file-actions .btn-sm:hover { background: #00ff88; color: #000; }
-        .file-item .file-actions .btn-sm.red { color: #ff4466; border-color: rgba(255,68,102,0.2); }
-        .file-item .file-actions .btn-sm.red:hover { background: #ff4466; color: #000; }
-        .status-badge { font-size: 0.45rem; padding: 2px 10px; border-radius: 12px; border: 1px solid; text-transform: uppercase; }
-        .status-badge.running { color: #00ff88; border-color: rgba(0,255,136,0.3); }
-        .status-badge.stopped { color: #ff4466; border-color: rgba(255,68,102,0.3); }
-        .top-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid rgba(0,255,136,0.08); max-width: 520px; margin-left: auto; margin-right: auto; }
-        .top-bar .title { font-size: 1.1rem; font-weight: 700; letter-spacing: 2px; }
-        .top-bar .title span { color: #33ddff; }
-        .profile-icon { width: 44px; height: 44px; border-radius: 50%; background: rgba(0,255,136,0.08); border: 1.5px solid rgba(0,255,136,0.25); color: #00ff88; display: flex; align-items: center; justify-content: center; font-size: 1rem; font-weight: 700; cursor: pointer; text-transform: uppercase; }
-        .profile-dropdown { display: none; position: absolute; right: 0; top: 55px; width: 280px; max-height: 80vh; overflow-y: auto; background: #0a100e; border: 1px solid rgba(0,255,136,0.15); padding: 14px; border-radius: 10px; flex-direction: column; gap: 2px; z-index: 20; backdrop-filter: blur(12px); }
-        .profile-dropdown.open { display: flex; }
-        .profile-dropdown .user-info { display: flex; flex-direction: column; gap: 2px; border-bottom: 1px solid rgba(0,255,136,0.08); padding-bottom: 10px; margin-bottom: 8px; }
-        .profile-dropdown .user-name { font-size: 0.9rem; font-weight: 600; color: #00ff88; }
-        .profile-dropdown .user-role { font-size: 0.5rem; opacity: 0.35; letter-spacing: 2px; text-transform: uppercase; }
-        .profile-dropdown .section-label { font-size: 0.45rem; opacity: 0.3; letter-spacing: 3px; text-transform: uppercase; padding: 6px 4px 2px 4px; border-top: 1px solid rgba(0,255,136,0.05); margin-top: 4px; }
-        .profile-dropdown .dashboard-btn { background: transparent; border: 1px solid rgba(0,255,136,0.06); color: #00ff88; padding: 8px 10px; font-family: 'Orbitron', 'Courier New', monospace; font-size: 0.6rem; text-align: left; cursor: pointer; border-radius: 6px; margin: 1px 0; width: 100%; }
-        .profile-dropdown .dashboard-btn:hover { background: rgba(0,255,136,0.1); border-color: rgba(0,255,136,0.2); }
-        #dashboardPage { display: none; }
-        .hidden { display: none !important; }
-        .btn-vertical { display: flex; flex-direction: column; gap: 8px; }
         .modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); backdrop-filter: blur(6px); z-index: 999; justify-content: center; align-items: center; }
         .modal-overlay.active { display: flex; }
         .modal-box { background: #0a100e; border: 1.5px solid rgba(0,255,136,0.2); border-radius: 12px; padding: 25px 20px; width: 420px; max-width: 92%; max-height: 90vh; overflow-y: auto; }
@@ -3017,61 +2416,260 @@ HTML_TEMPLATE = '''
         .modal-actions .dashboard-btn { flex: 1; text-align: center; padding: 10px; margin: 0; font-size: 0.6rem; }
         .modal-actions .dashboard-btn.cancel { background: transparent; border-color: rgba(255,68,102,0.2); color: #ff4466; }
         .modal-actions .dashboard-btn.cancel:hover { background: #ff4466; color: #000; }
-        .storage-bar { width: 100%; height: 6px; background: rgba(0,255,136,0.08); border-radius: 3px; overflow: hidden; margin: 4px 0 8px 0; }
-        .storage-bar .fill { height: 100%; background: linear-gradient(90deg, #00ff88, #33ddff); border-radius: 3px; transition: width 0.5s; }
-        .storage-bar .fill.warning { background: linear-gradient(90deg, #ffaa33, #ff4466); }
-        .storage-text { font-size: 0.5rem; opacity: 0.4; text-align: right; }
+        .file-item { display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; margin: 3px 0; border: 1px solid rgba(0,255,136,0.06); border-radius: 6px; background: rgba(0,0,0,0.2); flex-wrap: wrap; gap: 4px; cursor: default; }
+        .file-item .file-info { display: flex; align-items: center; gap: 8px; font-size: 0.7rem; flex-wrap: wrap; }
+        .file-item .file-info .name { color: #00ff88; }
+        .file-item .file-info .size { opacity: 0.3; font-size: 0.55rem; }
+        .file-item .file-actions { display: flex; gap: 4px; flex-wrap: wrap; }
+        .file-item .file-actions .btn-sm { padding: 2px 8px; font-size: 0.45rem; border: 1px solid rgba(0,255,136,0.15); border-radius: 4px; background: transparent; color: #00ff88; cursor: pointer; font-family: 'Orbitron', 'Courier New', monospace; letter-spacing: 0.5px; }
+        .file-item .file-actions .btn-sm:hover { background: #00ff88; color: #000; }
+        .file-item .file-actions .btn-sm.red { color: #ff4466; border-color: rgba(255,68,102,0.2); }
+        .file-item .file-actions .btn-sm.red:hover { background: #ff4466; color: #000; }
+        .file-item .file-actions .btn-sm.orange { color: #ffaa33; border-color: rgba(255,170,51,0.2); }
+        .file-item .file-actions .btn-sm.orange:hover { background: #ffaa33; color: #000; }
+        .file-item .file-actions .btn-sm.blue { color: #33ddff; border-color: rgba(51,221,255,0.2); }
+        .file-item .file-actions .btn-sm.blue:hover { background: #33ddff; color: #000; }
+        .file-item .file-actions .btn-sm.purple { color: #bb88ff; border-color: rgba(187,136,255,0.2); }
+        .file-item .file-actions .btn-sm.purple:hover { background: #bb88ff; color: #000; }
+        .file-item .file-actions .btn-sm.white { color: #ffffff; border-color: rgba(255,255,255,0.2); }
+        .file-item .file-actions .btn-sm.white:hover { background: #ffffff; color: #000; }
+        .file-item .file-actions .btn-sm.green { color: #00ff88; border-color: rgba(0,255,136,0.2); }
+        .file-item .file-actions .btn-sm.green:hover { background: #00ff88; color: #000; }
+        .file-item .file-actions .btn-sm.download { color: #33ddff; border-color: rgba(51,221,255,0.2); }
+        .file-item .file-actions .btn-sm.download:hover { background: #33ddff; color: #000; }
+        .status-badge { font-size: 0.45rem; padding: 2px 10px; border-radius: 12px; border: 1px solid; text-transform: uppercase; letter-spacing: 1px; }
+        .status-badge.running { color: #00ff88; border-color: rgba(0,255,136,0.3); }
+        .status-badge.stopped { color: #ff4466; border-color: rgba(255,68,102,0.3); }
+        .role-badge { font-size: 0.4rem; padding: 2px 10px; border-radius: 12px; border: 1px solid; text-transform: uppercase; letter-spacing: 1px; }
+        .role-badge.owner { color: #ffaa33; border-color: rgba(255,170,51,0.3); }
+        .role-badge.admin { color: #33ddff; border-color: rgba(51,221,255,0.3); }
+        .role-badge.user { color: #00ff88; border-color: rgba(0,255,136,0.3); }
+        .top-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid rgba(0,255,136,0.08); max-width: 520px; margin-left: auto; margin-right: auto; }
+        .top-bar .title { font-size: 1.1rem; font-weight: 700; letter-spacing: 2px; }
+        .top-bar .title span { color: #33ddff; }
+        .profile-icon { width: 44px; height: 44px; border-radius: 50%; background: rgba(0,255,136,0.08); border: 1.5px solid rgba(0,255,136,0.25); color: #00ff88; display: flex; align-items: center; justify-content: center; font-size: 1rem; font-weight: 700; cursor: pointer; text-transform: uppercase; }
+        .profile-icon:hover { background: #00ff88; color: #000; border-color: #00ff88; }
+        .profile-dropdown { display: none; position: absolute; right: 0; top: 55px; width: 280px; max-height: 80vh; overflow-y: auto; background: #0a100e; border: 1px solid rgba(0,255,136,0.15); padding: 14px; border-radius: 10px; flex-direction: column; gap: 2px; z-index: 20; backdrop-filter: blur(12px); }
+        .profile-dropdown.open { display: flex; }
+        .profile-dropdown .user-info { display: flex; flex-direction: column; gap: 2px; border-bottom: 1px solid rgba(0,255,136,0.08); padding-bottom: 10px; margin-bottom: 8px; }
+        .profile-dropdown .user-name { font-size: 0.9rem; font-weight: 600; color: #00ff88; }
+        .profile-dropdown .user-role { font-size: 0.5rem; opacity: 0.35; letter-spacing: 2px; text-transform: uppercase; }
+        .profile-dropdown .section-label { font-size: 0.45rem; opacity: 0.3; letter-spacing: 3px; text-transform: uppercase; padding: 6px 4px 2px 4px; border-top: 1px solid rgba(0,255,136,0.05); margin-top: 4px; }
+        .profile-dropdown .dashboard-btn { background: transparent; border: 1px solid rgba(0,255,136,0.06); color: #00ff88; padding: 8px 10px; font-family: 'Orbitron', 'Courier New', monospace; font-size: 0.6rem; text-align: left; cursor: pointer; border-radius: 6px; margin: 1px 0; transition: all 0.15s ease; width: 100%; }
+        .profile-dropdown .dashboard-btn:hover { background: rgba(0,255,136,0.1); border-color: rgba(0,255,136,0.2); }
+        .profile-dropdown .dashboard-btn.red { color: #ff4466; border-color: rgba(255,68,102,0.1); }
+        .profile-dropdown .dashboard-btn.red:hover { background: rgba(255,68,102,0.1); border-color: rgba(255,68,102,0.3); }
+        .btn-vertical { display: flex; flex-direction: column; gap: 8px; }
+        #dashboardPage { display: none; }
+        .top-bar { position: relative; }
+        .status-info { background: rgba(0,255,136,0.05); border: 1px solid rgba(0,255,136,0.1); padding: 8px 12px; border-radius: 6px; margin-bottom: 10px; font-size: 0.6rem; letter-spacing: 1px; }
+        .node-list { font-size: 0.7rem; line-height: 2; border-left: 2px solid rgba(0, 255, 136, 0.1); padding-left: 14px; margin: 6px 0 12px 0; }
+        .node-item { display: flex; justify-content: space-between; align-items: center; padding: 2px 0; border-bottom: 1px solid rgba(0,255,136,0.04); }
+        .node-item .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; }
+        .node-item .status-dot.running { background: #00ff88; }
+        .node-item .status-dot.stopped { background: #ff4466; }
+        .user-item { display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; margin: 2px 0; border: 1px solid rgba(0,255,136,0.06); border-radius: 6px; background: rgba(0,0,0,0.2); }
+        .user-item .user-info { display: flex; align-items: center; gap: 8px; font-size: 0.7rem; flex-wrap: wrap; }
+        .user-item .user-info .uname { color: #00ff88; }
+        .user-item .user-info .created { opacity: 0.3; font-size: 0.5rem; }
+        .user-item .user-actions { display: flex; gap: 4px; }
+        .terminal-container { background: #050807; border: 1px solid rgba(0,255,136,0.1); border-radius: 8px; padding: 12px; max-height: 300px; overflow-y: auto; font-family: 'Courier New', monospace; font-size: 0.7rem; color: #00ff88; white-space: pre-wrap; word-break: break-all; }
+        .terminal-container::-webkit-scrollbar { width: 4px; }
+        .terminal-container::-webkit-scrollbar-track { background: rgba(0,255,136,0.05); }
+        .terminal-container::-webkit-scrollbar-thumb { background: rgba(0,255,136,0.2); border-radius: 2px; }
+        .terminal-input-row { display: flex; gap: 8px; margin-top: 8px; }
+        .terminal-input-row input { flex: 1; padding: 8px 10px; font-size: 0.7rem; background: rgba(0,0,0,0.6); border: 1.5px solid rgba(0,255,136,0.15); color: #00ff88; border-radius: 6px; font-family: 'Courier New', monospace; }
+        .terminal-input-row input:focus { border-color: rgba(0,255,136,0.4); outline: none; }
+        .terminal-input-row .dashboard-btn { flex: 0 0 auto; width: auto; padding: 8px 16px; font-size: 0.55rem; }
+        .folder-nav { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; padding: 8px; background: rgba(0,0,0,0.3); border-radius: 6px; font-size: 0.6rem; }
+        .folder-nav .crumb { color: #33ddff; cursor: pointer; opacity: 0.6; transition: opacity 0.2s; }
+        .folder-nav .crumb:hover { opacity: 1; }
+        .folder-nav .separator { opacity: 0.2; padding: 0 2px; }
+        .folder-nav .current { opacity: 1; color: #00ff88; }
+        .folder-item { display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; margin: 2px 0; border: 1px solid rgba(0,255,136,0.06); border-radius: 6px; background: rgba(0,0,0,0.2); cursor: pointer; transition: background 0.15s; }
+        .folder-item:hover { background: rgba(0,255,136,0.05); }
+        .folder-item .folder-info { display: flex; align-items: center; gap: 8px; font-size: 0.7rem; flex-wrap: wrap; }
+        .folder-item .folder-info .icon { font-size: 1rem; }
+        .folder-item .folder-info .name { color: #33ddff; }
+        .folder-item .folder-actions { display: flex; gap: 4px; flex-wrap: wrap; }
+        .folder-item .folder-actions .btn-sm { padding: 2px 8px; font-size: 0.4rem; border: 1px solid rgba(0,255,136,0.15); border-radius: 4px; background: transparent; color: #00ff88; cursor: pointer; font-family: 'Orbitron', 'Courier New', monospace; }
+        .folder-item .folder-actions .btn-sm:hover { background: #00ff88; color: #000; }
+        .folder-item .folder-actions .btn-sm.red { color: #ff4466; border-color: rgba(255,68,102,0.2); }
+        .folder-item .folder-actions .btn-sm.red:hover { background: #ff4466; color: #000; }
+        .folder-item .folder-actions .btn-sm.orange { color: #ffaa33; border-color: rgba(255,170,51,0.2); }
+        .folder-item .folder-actions .btn-sm.orange:hover { background: #ffaa33; color: #000; }
+        .folder-item .folder-actions .btn-sm.blue { color: #33ddff; border-color: rgba(51,221,255,0.2); }
+        .folder-item .folder-actions .btn-sm.blue:hover { background: #33ddff; color: #000; }
+        .folder-item .folder-actions .btn-sm.purple { color: #bb88ff; border-color: rgba(187,136,255,0.2); }
+        .folder-item .folder-actions .btn-sm.purple:hover { background: #bb88ff; color: #000; }
+        .folder-item .folder-actions .btn-sm.white { color: #ffffff; border-color: rgba(255,255,255,0.2); }
+        .folder-item .folder-actions .btn-sm.white:hover { background: #ffffff; color: #000; }
+        .folder-item .folder-actions .btn-sm.green { color: #00ff88; border-color: rgba(0,255,136,0.2); }
+        .folder-item .folder-actions .btn-sm.green:hover { background: #00ff88; color: #000; }
+        .folder-item .folder-actions .btn-sm.download { color: #33ddff; border-color: rgba(51,221,255,0.2); }
+        .folder-item .folder-actions .btn-sm.download:hover { background: #33ddff; color: #000; }
+        .folder-manager-toolbar { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+        .folder-manager-toolbar .dashboard-btn { flex: 1; min-width: 80px; padding: 8px 10px; font-size: 0.55rem; }
+        .search-input { flex: 2; min-width: 120px; padding: 8px 10px; font-size: 0.55rem; background: rgba(0,0,0,0.6); border: 1.5px solid rgba(0,255,136,0.15); color: #00ff88; border-radius: 6px; font-family: 'Orbitron', 'Courier New', monospace; }
+        .search-input:focus { border-color: rgba(0,255,136,0.4); outline: none; }
+        .context-menu { display: none; position: fixed; background: #0a100e; border: 1px solid rgba(0,255,136,0.15); border-radius: 8px; padding: 6px 0; min-width: 180px; z-index: 1000; backdrop-filter: blur(12px); box-shadow: 0 8px 30px rgba(0,0,0,0.6); }
+        .context-menu.open { display: block; }
+        .context-menu .menu-item { padding: 8px 16px; font-size: 0.6rem; color: #00ff88; cursor: pointer; transition: background 0.15s; font-family: 'Orbitron', 'Courier New', monospace; letter-spacing: 0.5px; }
+        .context-menu .menu-item:hover { background: rgba(0,255,136,0.08); }
+        .context-menu .menu-item.red { color: #ff4466; }
+        .context-menu .menu-item.red:hover { background: rgba(255,68,102,0.08); }
+        .context-menu .menu-item.blue { color: #33ddff; }
+        .context-menu .menu-item.blue:hover { background: rgba(51,221,255,0.08); }
+        .context-menu .menu-item.green { color: #00ff88; }
+        .context-menu .menu-item.green:hover { background: rgba(0,255,136,0.08); }
+        .context-menu .menu-item.orange { color: #ffaa33; }
+        .context-menu .menu-item.orange:hover { background: rgba(255,170,51,0.08); }
+        .context-menu .menu-item.white { color: #ffffff; }
+        .context-menu .menu-item.white:hover { background: rgba(255,255,255,0.08); }
+        .context-menu .menu-item.purple { color: #bb88ff; }
+        .context-menu .menu-item.purple:hover { background: rgba(187,136,255,0.08); }
+        .context-menu .menu-divider { height: 1px; background: rgba(0,255,136,0.06); margin: 4px 12px; }
+        .file-details-grid { display: grid; grid-template-columns: 1fr 2fr; gap: 6px 12px; font-size: 0.65rem; margin: 10px 0; }
+        .file-details-grid .label { opacity: 0.4; }
+        .file-details-grid .value { color: #00ff88; word-break: break-all; }
+        .hidden { display: none !important; }
+        .mt-2 { margin-top: 8px; }
+        .flex { display: flex; gap: 8px; }
+        .flex .dashboard-btn { flex: 1; }
+        #loader { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: #050807; display: flex; flex-direction: column; justify-content: center; align-items: center; z-index: 1000; transition: opacity 0.6s ease; }
+        .loader-ring { width: 80px; height: 80px; border-radius: 50%; border: 3px solid transparent; border-top: 3px solid #00ff88; border-right: 3px solid #33ddff; animation: spin 0.8s linear infinite; position: relative; margin-bottom: 24px; }
+        .loader-ring::before { content: ''; position: absolute; top: 8px; left: 8px; right: 8px; bottom: 8px; border-radius: 50%; border: 3px solid transparent; border-bottom: 3px solid #00ff88; border-left: 3px solid #33ddff; animation: spin 0.5s linear infinite reverse; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        #loader .loader-text { font-size: 0.9rem; letter-spacing: 6px; opacity: 0.6; text-transform: uppercase; background: linear-gradient(90deg, #00ff88, #33ddff); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        #loader .loader-progress { margin-top: 16px; width: 200px; height: 2px; background: rgba(0,255,136,0.08); border-radius: 2px; overflow: hidden; }
+        #loader .loader-progress .bar { height: 100%; width: 0%; background: linear-gradient(90deg, #00ff88, #33ddff); border-radius: 2px; transition: width 0.15s ease; }
+        .file-input-wrapper { position: relative; width: 100%; }
+        .file-input-wrapper input[type="file"] { position: absolute; opacity: 0; width: 100%; height: 100%; cursor: pointer; top: 0; left: 0; }
+        .file-input-wrapper .file-label { background: rgba(0,0,0,0.6); border: 1.5px solid rgba(0,255,136,0.15); color: #00ff88; padding: 10px 12px; border-radius: 8px; font-family: 'Orbitron', 'Courier New', monospace; font-size: 0.6rem; display: flex; align-items: center; justify-content: center; gap: 8px; cursor: pointer; min-height: 44px; text-align: center; width: 100%; }
+        .file-input-wrapper .file-label:hover { border-color: rgba(0,255,136,0.4); }
+        .file-input-wrapper .file-label .file-count { background: rgba(0,255,136,0.1); border-radius: 12px; padding: 0 10px; font-size: 0.5rem; border: 1px solid rgba(0,255,136,0.15); }
+        .code-editor { font-family: 'Courier New', monospace; font-size: 0.65rem; background: #050807; color: #00ff88; border: 1px solid rgba(0,255,136,0.15); border-radius: 6px; padding: 10px; width: 100%; min-height: 200px; resize: vertical; tab-size: 4; }
+        .code-editor:focus { border-color: rgba(0,255,136,0.4); outline: none; }
+        .user-card { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; margin: 4px 0; border: 1px solid rgba(0,255,136,0.08); border-radius: 6px; background: rgba(0,0,0,0.2); flex-wrap: wrap; gap: 6px; }
+        .user-card .user-data { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 0.65rem; }
+        .user-card .user-data .username { color: #00ff88; font-weight: 600; }
+        .user-card .user-data .password { opacity: 0.5; font-size: 0.55rem; }
+        .user-card .user-data .role-badge { font-size: 0.4rem; }
+        .user-card .user-actions .btn-sm { padding: 2px 10px; font-size: 0.45rem; border: 1px solid rgba(255,68,102,0.2); border-radius: 4px; background: transparent; color: #ff4466; cursor: pointer; font-family: 'Orbitron', 'Courier New', monospace; }
+        .user-card .user-actions .btn-sm:hover { background: #ff4466; color: #000; }
+        .popup-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.9); backdrop-filter: blur(10px); z-index: 99999; justify-content: center; align-items: center; }
+        .popup-overlay.active { display: flex; }
+        .popup-box { background: #0a100e; border: 1.5px solid rgba(0,255,136,0.2); border-radius: 16px; padding: 30px 28px; width: 360px; max-width: 92%; text-align: center; box-shadow: 0 20px 60px rgba(0,0,0,0.8); }
+        .popup-box .popup-title { font-size: 1.2rem; font-weight: 700; color: #00ff88; letter-spacing: 2px; margin-bottom: 10px; }
+        .popup-box .popup-sub { font-size: 0.65rem; opacity: 0.4; letter-spacing: 1px; margin-bottom: 20px; }
+        .popup-box .popup-btn { padding: 12px 30px; cursor: pointer; border: 1.5px solid rgba(0,255,136,0.3); background: rgba(0,255,136,0.05); color: #00ff88; font-weight: 600; font-family: 'Orbitron', 'Courier New', monospace; font-size: 0.7rem; border-radius: 10px; transition: all 0.2s ease; letter-spacing: 1px; margin: 6px 8px; min-width: 120px; }
+        .popup-box .popup-btn:hover { background: #00ff88; color: #000; border-color: #00ff88; }
+        .popup-box .popup-btn.close-btn { border-color: rgba(255,68,102,0.3); color: #ff4466; background: rgba(255,68,102,0.05); }
+        .popup-box .popup-btn.close-btn:hover { background: #ff4466; color: #000; }
+        .popup-box .popup-icon { font-size: 3rem; margin-bottom: 10px; }
         @media (max-width: 480px) {
             .auth-container { width: 95%; padding: 25px 16px; }
-            .stat-grid { grid-template-columns: 1fr 1fr; }
-            .profile-dropdown { width: 220px; }
+            .auth-container .brand h1 { font-size: 1.2rem; }
+            .stat-grid { grid-template-columns: 1fr 1fr; gap: 6px; }
+            .stat-box { padding: 8px 2px; }
+            .stat-num { font-size: 1.2rem; }
+            .profile-dropdown { width: 220px; right: 0; }
             .modal-box { width: 95%; padding: 20px 14px; }
+            .file-item .file-actions .btn-sm { font-size: 0.4rem; padding: 1px 4px; }
+            .terminal-input-row { flex-direction: column; }
+            .context-menu { min-width: 150px; }
+            .user-card { flex-direction: column; align-items: stretch; }
+            .user-card .user-data { justify-content: center; }
+            .user-card .user-actions { text-align: center; }
+            .folder-manager-toolbar .dashboard-btn { min-width: 60px; font-size: 0.45rem; }
+            .folder-item .folder-actions .btn-sm { font-size: 0.35rem; padding: 1px 4px; }
+            .popup-box { padding: 25px 16px; width: 95%; }
+            .popup-box .popup-btn { min-width: 80px; padding: 10px 18px; font-size: 0.6rem; }
         }
     </style>
 </head>
 <body>
 
-<div id="loader" style="position:fixed;top:0;left:0;width:100%;height:100%;background:#050807;display:flex;flex-direction:column;justify-content:center;align-items:center;z-index:1000;">
-    <div style="width:80px;height:80px;border-radius:50%;border:3px solid transparent;border-top:3px solid #00ff88;border-right:3px solid #33ddff;animation:spin 0.8s linear infinite;margin-bottom:24px;"></div>
-    <div style="font-size:0.9rem;letter-spacing:6px;opacity:0.6;text-transform:uppercase;background:linear-gradient(90deg,#00ff88,#33ddff);-webkit-background-clip:text;-webkit-text-fill-color:transparent;">Loading...</div>
-    <style>@keyframes spin{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}</style>
+<div id="loader">
+    <div class="loader-ring"></div>
+    <div class="loader-text">⚡ Loading...</div>
+    <div class="loader-progress"><div class="bar" id="loaderBar"></div></div>
 </div>
 
-<div class="toast" id="toast"><span id="toastMessage">ACCESS GRANTED</span></div>
+<div class="toast" id="toast">
+    <span id="toastMessage">ACCESS GRANTED</span>
+    <div id="toastSub" style="font-size:0.5rem;opacity:0.35;margin-top:3px;letter-spacing:1px;">SECURE CONNECTION ESTABLISHED</div>
+</div>
 
+<!-- POPUP -->
+<div class="popup-overlay" id="popupOverlay">
+    <div class="popup-box">
+        <div class="popup-icon">📢</div>
+        <div class="popup-title">JOIN OUR CHANNEL</div>
+        <div class="popup-sub">Stay updated with latest news and updates</div>
+        <div>
+            <button class="popup-btn" id="popupJoinBtn">🔗 Join Now</button>
+            <button class="popup-btn close-btn" id="popupCloseBtn">❌ Close</button>
+        </div>
+    </div>
+</div>
+
+<!-- LOGIN -->
 <div class="auth-container" id="loginBox">
-    <div class="brand"><h1>🐍 PYTHON <span class="highlight">HOSTING</span></h1></div>
+    <div class="brand">
+        <h1>🐍 PYTHON <span class="highlight">HOSTING</span></h1>
+        <div class="sub">⚡ Render Cloud Shell ⚡</div>
+    </div>
     <div class="divider"></div>
-    <h2 style="font-size:0.7rem;opacity:0.4;font-weight:400;margin-bottom:18px;">▶ AUTHENTICATION REQUIRED</h2>
-    <div class="input-group"><label>👤 USERNAME</label><input type="text" id="user" placeholder="Enter Username"></div>
-    <div class="input-group"><label>🔒 PASSWORD</label><input type="password" id="pass" placeholder="Enter Password"></div>
+    <h2>▶ AUTHENTICATION REQUIRED</h2>
+    <div class="input-group">
+        <label>👤 USERNAME</label>
+        <input type="text" id="user" placeholder="Enter Username">
+    </div>
+    <div class="input-group">
+        <label>🔒 PASSWORD</label>
+        <input type="password" id="pass" placeholder="Enter Password">
+    </div>
     <div class="login-error" id="loginError">❌ Invalid username or password</div>
     <button class="btn-primary" id="unlock-btn">⚡ UNLOCK DASHBOARD</button>
     <button class="btn-secondary" id="createAccountBtn">➕ CREATE ACCOUNT</button>
+    <button class="btn-secondary contact-btn" id="contactOwnerBtn">📧 DM TO BUY</button>
+    <div style="margin-top:22px;font-size:0.5rem;opacity:0.15;letter-spacing:2px;text-transform:uppercase;">
+        UNAUTHORIZED ACCESS PROHIBITED
+    </div>
 </div>
 
+<!-- DASHBOARD -->
 <div id="dashboardPage">
     <div class="top-bar">
         <div class="title">🐍 <span>PYTHON</span> HOSTING</div>
         <div style="position:relative;">
             <div class="profile-icon" id="profileIcon">R</div>
             <div class="profile-dropdown" id="profileDropdown">
-                <div class="user-info"><span class="user-name" id="dropdownUsername">👤 riyaj</span><span class="user-role" id="dropdownRole">ROLE: OWNER</span></div>
+                <div class="user-info">
+                    <span class="user-name" id="dropdownUsername">👤 riyaj</span>
+                    <span class="user-role" id="dropdownRole">ROLE: OWNER</span>
+                </div>
                 <div class="section-label">👤 ACCOUNT</div>
                 <button class="dashboard-btn" id="menuChangeUsername">✏️ Change Username</button>
                 <button class="dashboard-btn" id="menuChangePassword">🔑 Change Password</button>
                 <button class="dashboard-btn" id="menuDownloadAll">📦 Download All Files</button>
+                
                 <div class="section-label">📁 ADMIN</div>
                 <button class="dashboard-btn" id="menuMyFiles">📂 My Files</button>
                 <button class="dashboard-btn" id="menuMyNodes">🖥 My Nodes</button>
                 <button class="dashboard-btn" id="menuAllUsers">👥 All Users</button>
                 <button class="dashboard-btn" id="menuAddUser">➕ Add User</button>
+                
                 <div class="section-label">👑 OWNER</div>
                 <button class="dashboard-btn" id="menuAllFiles">📁 All Files</button>
                 <button class="dashboard-btn" id="menuAdminsList">👑 Admins List</button>
                 <button class="dashboard-btn" id="menuAddAdmin">➕ Add Admin</button>
                 <button class="dashboard-btn" id="menuTerminal">💻 Terminal</button>
                 <button class="dashboard-btn" id="menuSettings">⚙ Settings</button>
+                <button class="dashboard-btn" id="menuBackup">📦 Backup</button>
+                <button class="dashboard-btn" id="menuStorage">💾 Storage</button>
+                
                 <div class="section-label">⚙ SYSTEM</div>
                 <button class="dashboard-btn red" id="menuLogout">🚪 Logout</button>
             </div>
@@ -3081,13 +2679,21 @@ HTML_TEMPLATE = '''
     <div id="mainContent">
         <div id="pageDashboard">
             <div class="box">
-                <div class="storage-bar"><div class="fill" id="storageFill" style="width:0%"></div></div>
-                <div class="storage-text" id="storageText">Loading storage...</div>
+                <div class="status-info" id="statusInfo">
+                    🤖 Running Files: <span id="botStatus">0</span> | 📁 Files: <span id="fileCountStatus">0</span>
+                </div>
                 <div class="stat-grid">
                     <div class="stat-box"><span class="stat-num" id="stoppedCount">0</span><div class="stat-label">Stopped</div></div>
                     <div class="stat-box"><span class="stat-num" id="fileCount">0</span><div class="stat-label">Files</div></div>
                     <div class="stat-box"><span class="stat-num" id="runningCount">0</span><div class="stat-label">Running</div></div>
                     <div class="stat-box"><span class="stat-num" id="processCount">0</span><div class="stat-label">Processes</div></div>
+                </div>
+                <div id="storageDisplay">
+                    <div style="display:flex;justify-content:space-between;font-size:0.55rem;opacity:0.6;margin-bottom:4px;">
+                        <span>💾 Storage</span>
+                        <span id="storageText">0 MB / 480 MB (0%)</span>
+                    </div>
+                    <div class="storage-bar"><div class="fill" id="storageBar" style="width:0%;"></div></div>
                 </div>
                 <button class="dashboard-btn red" id="logoutBtn">🚪 Logout</button>
             </div>
@@ -3095,52 +2701,200 @@ HTML_TEMPLATE = '''
             <div class="box">
                 <h2>📤 Upload & Deploy</h2>
                 <div style="display:flex;gap:8px;flex-wrap:wrap;">
-                    <div class="file-input-wrapper" style="flex:2;min-width:150px;position:relative;width:100%;">
-                        <input type="file" id="fileInput" multiple style="position:absolute;opacity:0;width:100%;height:100%;cursor:pointer;top:0;left:0;">
-                        <div class="file-label" id="fileLabel" style="background:rgba(0,0,0,0.6);border:1.5px solid rgba(0,255,136,0.15);color:#00ff88;padding:10px 12px;border-radius:8px;font-family:'Orbitron','Courier New',monospace;font-size:0.6rem;display:flex;align-items:center;justify-content:center;gap:8px;cursor:pointer;min-height:44px;text-align:center;width:100%;">
-                            📎 Select Files <span class="file-count" id="fileCountBadge" style="background:rgba(0,255,136,0.1);border-radius:12px;padding:0 10px;font-size:0.5rem;border:1px solid rgba(0,255,136,0.15);">0 selected</span>
+                    <div class="file-input-wrapper" style="flex:2;min-width:150px;">
+                        <input type="file" id="fileInput" multiple>
+                        <div class="file-label" id="fileLabel">
+                            📎 Select Files
+                            <span class="file-count" id="fileCountBadge">0 selected</span>
                         </div>
                     </div>
                     <button class="dashboard-btn green" id="uploadBtn" style="flex:1;min-width:100px;">📦 Upload</button>
                 </div>
+                <p class="p-small" id="uploadStatus">Upload any files – .py, .zip, .json, .txt, etc. All go directly to your folder.</p>
             </div>
 
             <div class="box">
                 <h2>⌨ Deploy Code</h2>
-                <input type="text" id="pyFilename" value="main.py">
-                <textarea rows="5" id="pyCodeArea" placeholder="Paste your Python code here..."></textarea>
+                <input type="text" id="pyFilename" value="main.py" placeholder="filename.py" style="font-size:0.7rem;">
+                <textarea rows="5" id="pyCodeArea" placeholder="Paste your Python code here..." style="font-size:0.7rem;"></textarea>
                 <button class="dashboard-btn blue" id="deployBtn">▶ Deploy & Run</button>
+                <p class="p-small" id="deployStatus">Paste code and deploy (Auto-install missing modules)</p>
+            </div>
+
+            <div class="box">
+                <h2>🖥 Running Nodes</h2>
+                <div class="node-list" id="runningNodesList">
+                    <div style="opacity:0.3;text-align:center;padding:10px;font-size:0.7rem;">No nodes running</div>
+                </div>
+                <div class="btn-vertical">
+                    <button class="dashboard-btn green" id="startAllBtn">▶ Start All</button>
+                    <button class="dashboard-btn red" id="stopAllBtn">■ Stop All</button>
+                </div>
             </div>
 
             <div class="box">
                 <h2>📁 My Files</h2>
-                <div id="filesList"><div style="opacity:0.3;text-align:center;padding:10px;font-size:0.7rem;">No files uploaded</div></div>
+                <div id="filesList">
+                    <div style="opacity:0.3;text-align:center;padding:10px;font-size:0.7rem;">No files uploaded</div>
+                </div>
             </div>
 
             <div class="box">
                 <h2>⚙ Manage</h2>
                 <div class="btn-vertical">
+                    <button class="dashboard-btn blue" id="logsBtn">≡ View Logs</button>
                     <button class="dashboard-btn green" id="refreshBtn">🔄 Refresh</button>
                     <button class="dashboard-btn blue" id="fileManagerBtn">📂 File Manager</button>
-                    <button class="dashboard-btn orange" id="logsBtn">≡ View Logs</button>
                 </div>
+                <p class="p-small" id="manageStatus">Manage your files and processes</p>
+            </div>
+            
+            <div id="contactOwnerDashboard" style="display:none;" class="box">
+                <h2>📧 Contact Owner</h2>
+                <button class="dashboard-btn" id="contactOwnerDashboardBtn" style="background:rgba(255,255,255,0.05);border-color:rgba(255,255,255,0.2);color:#ffffff;">📧 DM TO BUY</button>
+                <p class="p-small">Direct contact to owner</p>
             </div>
         </div>
 
-        <div id="pageAllUsers" class="hidden"><div class="box"><h2>👥 All Users</h2><div id="allUsersList"></div><button class="dashboard-btn blue" id="backFromUsers">← Back</button></div></div>
-        <div id="pageAdminsList" class="hidden"><div class="box"><h2>👑 Admins List</h2><div id="adminsList"></div><button class="dashboard-btn blue" id="backFromAdmins">← Back</button></div></div>
-        <div id="pageAllFiles" class="hidden"><div class="box"><h2>📁 All Files</h2><div id="allFilesList"></div><button class="dashboard-btn blue" id="backFromAllFiles">← Back</button></div></div>
-        <div id="pageMyNodes" class="hidden"><div class="box"><h2>🖥 My Nodes</h2><div id="myNodesList"></div><button class="dashboard-btn blue" id="backFromNodes">← Back</button></div></div>
-        <div id="pageTerminal" class="hidden"><div class="box"><h2>💻 Terminal</h2><button class="dashboard-btn green" id="terminalStartBtn">▶ Start</button><button class="dashboard-btn red" id="terminalStopBtn">■ Stop</button><div class="terminal-container" id="terminalOutput" style="background:#050807;border:1px solid rgba(0,255,136,0.1);border-radius:8px;padding:12px;max-height:300px;overflow-y:auto;font-family:'Courier New',monospace;font-size:0.7rem;color:#00ff88;white-space:pre-wrap;"></div><div class="terminal-input-row" style="display:flex;gap:8px;margin-top:8px;"><input type="text" id="terminalInput" placeholder="Enter command..." style="flex:1;padding:8px 10px;font-size:0.7rem;background:rgba(0,0,0,0.6);border:1.5px solid rgba(0,255,136,0.15);color:#00ff88;border-radius:6px;font-family:'Courier New',monospace;"><button class="dashboard-btn blue" id="terminalSendBtn" style="flex:0;padding:8px 16px;font-size:0.55rem;">Send</button></div><button class="dashboard-btn blue" id="backFromTerminal">← Back</button></div></div>
-        <div id="pageFolderManager" class="hidden"><div class="box"><h2>📂 File Manager</h2><div class="folder-nav" id="folderNav"><span class="crumb" data-path="">📁 Root</span></div><div class="folder-manager-toolbar" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;"><input type="text" class="search-input" id="folderSearch" placeholder="🔍 Search..." style="flex:2;min-width:120px;padding:8px 10px;font-size:0.55rem;background:rgba(0,0,0,0.6);border:1.5px solid rgba(0,255,136,0.15);color:#00ff88;border-radius:6px;font-family:'Orbitron','Courier New',monospace;"><button class="dashboard-btn blue" id="folderCreateDir" style="flex:1;min-width:80px;padding:8px 10px;font-size:0.55rem;">📁 New Folder</button><button class="dashboard-btn green" id="folderCreateFile" style="flex:1;min-width:80px;padding:8px 10px;font-size:0.55rem;">📄 New File</button><button class="dashboard-btn orange" id="folderRefresh" style="flex:1;min-width:80px;padding:8px 10px;font-size:0.55rem;">🔄 Refresh</button></div><div id="folderContent"></div><button class="dashboard-btn blue" id="backFromFolderManager">← Back</button></div></div>
+        <div id="pageAllUsers" class="hidden">
+            <div class="box">
+                <h2>👥 All Users</h2>
+                <div id="allUsersList">
+                    <div style="opacity:0.3;text-align:center;padding:10px;font-size:0.7rem;">Loading users...</div>
+                </div>
+                <button class="dashboard-btn blue" id="backFromUsers">← Back</button>
+            </div>
+        </div>
+
+        <div id="pageAdminsList" class="hidden">
+            <div class="box">
+                <h2>👑 Admins List</h2>
+                <div id="adminsList">
+                    <div style="opacity:0.3;text-align:center;padding:10px;font-size:0.7rem;">Loading admins...</div>
+                </div>
+                <button class="dashboard-btn blue" id="backFromAdmins">← Back</button>
+            </div>
+        </div>
+
+        <div id="pageAllFiles" class="hidden">
+            <div class="box">
+                <h2>📁 All Files</h2>
+                <div id="allFilesList">
+                    <div style="opacity:0.3;text-align:center;padding:10px;font-size:0.7rem;">Loading files...</div>
+                </div>
+                <button class="dashboard-btn blue" id="backFromAllFiles">← Back</button>
+            </div>
+        </div>
+
+        <div id="pageMyNodes" class="hidden">
+            <div class="box">
+                <h2>🖥 My Nodes</h2>
+                <div class="node-list" id="myNodesList">
+                    <div style="opacity:0.3;text-align:center;padding:10px;font-size:0.7rem;">No nodes running</div>
+                </div>
+                <button class="dashboard-btn blue" id="backFromNodes">← Back</button>
+            </div>
+        </div>
+
+        <div id="pageTerminal" class="hidden">
+            <div class="box">
+                <h2>💻 Interactive Terminal</h2>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
+                    <button class="dashboard-btn green" id="terminalStartBtn" style="flex:1;min-width:80px;padding:8px 10px;font-size:0.55rem;">▶ Start</button>
+                    <button class="dashboard-btn red" id="terminalStopBtn" style="flex:1;min-width:80px;padding:8px 10px;font-size:0.55rem;">■ Stop</button>
+                    <button class="dashboard-btn orange" id="terminalClearBtn" style="flex:1;min-width:80px;padding:8px 10px;font-size:0.55rem;">✕ Clear</button>
+                </div>
+                <div class="terminal-container" id="terminalOutput">
+                    <div style="opacity:0.3;text-align:center;padding:10px;font-size:0.7rem;">Click Start to begin terminal session</div>
+                </div>
+                <div class="terminal-input-row">
+                    <input type="text" id="terminalInput" placeholder="Enter command..." autofocus>
+                    <button class="dashboard-btn blue" id="terminalSendBtn" style="flex:0;padding:8px 16px;font-size:0.55rem;">Send</button>
+                </div>
+                <button class="dashboard-btn blue" id="backFromTerminal" style="margin-top:10px;">← Back</button>
+            </div>
+        </div>
+
+        <div id="pageFolderManager" class="hidden">
+            <div class="box">
+                <h2>📂 File Manager</h2>
+                <div class="folder-nav" id="folderNav">
+                    <span class="crumb" data-path="">📁 Root</span>
+                </div>
+                <div class="folder-manager-toolbar">
+                    <input type="text" class="search-input" id="folderSearch" placeholder="🔍 Search files...">
+                    <button class="dashboard-btn blue" id="folderCreateDir">📁 New Folder</button>
+                    <button class="dashboard-btn green" id="folderCreateFile">📄 New File</button>
+                    <button class="dashboard-btn orange" id="folderRefresh">🔄 Refresh</button>
+                </div>
+                <div id="folderContent">
+                    <div style="opacity:0.3;text-align:center;padding:10px;font-size:0.7rem;">Loading...</div>
+                </div>
+                <button class="dashboard-btn blue" id="backFromFolderManager">← Back</button>
+            </div>
+        </div>
+
+        <div id="pageBackup" class="hidden">
+            <div class="box">
+                <h2>📦 Backup Management</h2>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;">
+                    <button class="dashboard-btn green" id="createBackupBtn" style="flex:1;min-width:80px;">📦 Create Backup</button>
+                    <button class="dashboard-btn blue" id="refreshBackupsBtn" style="flex:1;min-width:80px;">🔄 Refresh</button>
+                </div>
+                <div id="backupList">
+                    <div style="opacity:0.3;text-align:center;padding:10px;font-size:0.7rem;">Loading backups...</div>
+                </div>
+                <button class="dashboard-btn blue" id="backFromBackup">← Back</button>
+            </div>
+        </div>
+
+        <div id="pageStorage" class="hidden">
+            <div class="box">
+                <h2>💾 Storage Management</h2>
+                <div id="storageDetails">
+                    <div style="opacity:0.3;text-align:center;padding:10px;font-size:0.7rem;">Loading storage info...</div>
+                </div>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;">
+                    <button class="dashboard-btn orange" id="cleanupStorageBtn" style="flex:1;">🧹 Cleanup Now</button>
+                    <button class="dashboard-btn blue" id="refreshStorageBtn" style="flex:1;">🔄 Refresh</button>
+                </div>
+                <button class="dashboard-btn blue" id="backFromStorage">← Back</button>
+            </div>
+        </div>
     </div>
 </div>
 
+<!-- MODAL -->
 <div class="modal-overlay" id="modalOverlay">
-    <div class="modal-box"><h3 id="modalTitle">Modal</h3><div id="modalBody"></div><div class="modal-actions"><button class="dashboard-btn cancel" id="modalCancel">Cancel</button><button class="dashboard-btn" id="modalConfirm">Confirm</button></div></div>
+    <div class="modal-box">
+        <h3 id="modalTitle">Modal</h3>
+        <div id="modalBody"></div>
+        <div class="modal-actions">
+            <button class="dashboard-btn cancel" id="modalCancel">Cancel</button>
+            <button class="dashboard-btn" id="modalConfirm">Confirm</button>
+        </div>
+    </div>
+</div>
+
+<div class="context-menu" id="contextMenu">
+    <div class="menu-item" data-action="open">📂 Open</div>
+    <div class="menu-item green" data-action="start">▶ Start</div>
+    <div class="menu-item orange" data-action="stop">■ Stop</div>
+    <div class="menu-item blue" data-action="download">⬇ Download</div>
+    <div class="menu-item" data-action="edit">✏️ Edit</div>
+    <div class="menu-item" data-action="rename">✏️ Rename</div>
+    <div class="menu-item purple" data-action="details">ℹ️ Details</div>
+    <div class="menu-divider"></div>
+    <div class="menu-item white" data-action="openbot">🤖 Open Bot</div>
+    <div class="menu-divider"></div>
+    <div class="menu-item red" data-action="delete">🗑 Delete</div>
 </div>
 
 <script>
+// ============================================================
+// COMPLETE JAVASCRIPT (full version - same as original with additions)
+// ============================================================
+
 (function() {
     "use strict";
 
@@ -3151,11 +2905,19 @@ HTML_TEMPLATE = '''
     let processes = [];
     let allUsers = [];
     let allFiles = [];
+    let autoRefreshInterval = null;
     let settings = {};
     let terminalSessionId = null;
     let terminalEventSource = null;
     let currentFolderPath = '';
     let folderContents = [];
+    let contextTargetFileId = null;
+    let contextTargetFileName = null;
+    let contextTargetIsDir = false;
+    let terminalCommandHistory = [];
+    let terminalHistoryIndex = -1;
+    let signupEnabled = true;
+    let storageInfo = {};
 
     const AUTO_LOGOUT_HOURS = 24;
     const CHECK_INTERVAL_MS = 60000;
@@ -3171,8 +2933,10 @@ HTML_TEMPLATE = '''
         }
         
         const elapsed = Date.now() - parseInt(lastActivity);
-        if (elapsed > AUTO_LOGOUT_HOURS * 60 * 60 * 1000) {
-            showToast('⏰ Session expired (24 hours)', true);
+        const maxAge = AUTO_LOGOUT_HOURS * 60 * 60 * 1000;
+        
+        if (elapsed > maxAge) {
+            showToast('⏰ Session expired (24 hours)', true, 'Please login again');
             setTimeout(() => { logout(); }, 2000);
         }
     }
@@ -3191,9 +2955,11 @@ HTML_TEMPLATE = '''
 
     const toast = document.getElementById('toast');
     const toastMsg = document.getElementById('toastMessage');
+    const toastSub = document.getElementById('toastSub');
+    const loader = document.getElementById('loader');
+    const loaderBar = document.getElementById('loaderBar');
     const loginBox = document.getElementById('loginBox');
     const dashboardPage = document.getElementById('dashboardPage');
-    const loader = document.getElementById('loader');
 
     const pages = {
         dashboard: document.getElementById('pageDashboard'),
@@ -3202,16 +2968,32 @@ HTML_TEMPLATE = '''
         allFiles: document.getElementById('pageAllFiles'),
         myNodes: document.getElementById('pageMyNodes'),
         terminal: document.getElementById('pageTerminal'),
-        folderManager: document.getElementById('pageFolderManager')
+        folderManager: document.getElementById('pageFolderManager'),
+        backup: document.getElementById('pageBackup'),
+        storage: document.getElementById('pageStorage')
     };
 
-    function showToast(message, isError) {
+    const fileInput = document.getElementById('fileInput');
+    const fileLabel = document.getElementById('fileLabel');
+    const fileCountBadge = document.getElementById('fileCountBadge');
+
+    function showToast(message, isError, subText) {
         toast.className = 'toast';
         if (isError) toast.classList.add('error');
         toastMsg.textContent = message || 'SUCCESS';
+        toastSub.textContent = subText || 'Operation completed';
         toast.classList.add('show');
         clearTimeout(toast._timeout);
         toast._timeout = setTimeout(() => toast.classList.remove('show'), 3000);
+    }
+
+    function updateLoader(progress) {
+        loaderBar.style.width = Math.min(progress, 100) + '%';
+    }
+
+    function hideLoader() {
+        loader.style.opacity = '0';
+        setTimeout(() => loader.style.display = 'none', 400);
     }
 
     function escapeHtml(text) {
@@ -3286,7 +3068,8 @@ HTML_TEMPLATE = '''
                 isLoggedIn = true;
                 localStorage.setItem('loggedInUser', JSON.stringify({ username: currentUser, role: currentRole }));
                 localStorage.setItem('lastActivity_' + currentUser, Date.now().toString());
-                showToast('⚡ ACCESS GRANTED');
+                showToast('⚡ ACCESS GRANTED', false, 'Welcome ' + currentUser + '!');
+                checkAndShowPopup();
                 return true;
             }
             document.getElementById('loginError').textContent = '❌ ' + data.error;
@@ -3304,7 +3087,7 @@ HTML_TEMPLATE = '''
         try {
             const data = await apiCall('/api/signup', 'POST', { username, password });
             if (data.success) {
-                showToast('✅ Account created!');
+                showToast('✅ Account created! You can now login.', false);
                 return true;
             }
             showToast('❌ ' + data.error, true);
@@ -3315,6 +3098,45 @@ HTML_TEMPLATE = '''
         }
     }
 
+    function checkAndShowPopup() {
+        settings.telegram_popup = settings.telegram_popup !== undefined ? settings.telegram_popup : true;
+        
+        if (!settings.telegram_popup) return;
+        
+        if (settings.popup_shown && settings.popup_shown[currentUser]) {
+            const lastShown = new Date(settings.popup_shown[currentUser].timestamp);
+            const now = new Date();
+            const hoursDiff = (now - lastShown) / (1000 * 60 * 60);
+            if (hoursDiff < 8) return;
+        }
+        
+        const popup = document.getElementById('popupOverlay');
+        popup.classList.add('active');
+        
+        const joinBtn = document.getElementById('popupJoinBtn');
+        const link = settings.telegram_link || 'https://t.me/+m0R5z1yhmCtiZjQ9';
+        joinBtn.onclick = function() {
+            window.open(link, '_blank');
+            popup.classList.remove('active');
+            markPopupShown();
+        };
+        
+        document.getElementById('popupCloseBtn').onclick = function() {
+            popup.classList.remove('active');
+            markPopupShown();
+        };
+    }
+
+    async function markPopupShown() {
+        try {
+            await apiCall('/api/settings/popup-shown', 'POST', { shown: true });
+            if (!settings.popup_shown) settings.popup_shown = {};
+            settings.popup_shown[currentUser] = { timestamp: new Date().toISOString(), shown: true };
+        } catch(e) {
+            console.error('Error marking popup:', e);
+        }
+    }
+
     function initDashboard() {
         loginBox.style.display = 'none';
         dashboardPage.style.display = 'block';
@@ -3322,7 +3144,7 @@ HTML_TEMPLATE = '''
         document.getElementById('dropdownUsername').textContent = '👤 ' + currentUser;
         document.getElementById('dropdownRole').textContent = 'ROLE: ' + currentRole.toUpperCase();
         
-        const ownerItems = document.querySelectorAll('#menuAllFiles, #menuAdminsList, #menuAddAdmin, #menuTerminal, #menuSettings');
+        const ownerItems = document.querySelectorAll('#menuAllFiles, #menuAdminsList, #menuAddAdmin, #menuTerminal, #menuSettings, #menuBackup, #menuStorage');
         const adminItems = document.querySelectorAll('#menuAllUsers, #menuAddUser');
         
         if (currentRole === 'owner') {
@@ -3337,11 +3159,21 @@ HTML_TEMPLATE = '''
         }
         
         showPage('dashboard');
-        fetchStorageStats();
+        fetchSettings();
         fetchFiles();
         fetchAllFiles();
         fetchProcesses();
         fetchUsers();
+        fetchStorage();
+        updateContactOwnerVisibility();
+        
+        if (autoRefreshInterval) clearInterval(autoRefreshInterval);
+        autoRefreshInterval = setInterval(() => { 
+            fetchProcesses(); 
+            fetchFiles();
+            fetchStorage();
+            if (currentRole === 'owner') fetchAllFiles();
+        }, 15000);
     }
 
     function logout() {
@@ -3357,22 +3189,166 @@ HTML_TEMPLATE = '''
         isLoggedIn = false;
         dashboardPage.style.display = 'none';
         loginBox.style.display = 'block';
-        showToast('🚪 LOGGED OUT');
+        showToast('🚪 LOGGED OUT', false);
     }
 
-    async function fetchStorageStats() {
+    async function fetchSettings() {
         try {
-            const data = await apiCall('/api/storage-stats');
-            const stats = data.storage || {};
-            const percent = stats.percent_used || 0;
-            const fill = document.getElementById('storageFill');
-            fill.style.width = percent + '%';
-            if (percent > 80) fill.classList.add('warning');
-            else fill.classList.remove('warning');
-            document.getElementById('storageText').textContent = `📊 ${stats.used_mb || 0} MB / ${stats.total_mb || 480} MB used (${percent}%)`;
+            const data = await apiCall('/api/settings');
+            settings = data.settings || {};
+            updateContactOwnerVisibility();
         } catch(e) {
-            console.error('Storage stats error:', e);
+            console.error('Error fetching settings:', e);
         }
+    }
+
+    function updateContactOwnerVisibility() {
+        const contactBtn = document.getElementById('contactOwnerBtn');
+        const contactOwner = settings.contact_owner || 'Card_hacker_12';
+        
+        contactBtn.textContent = '📧 DM TO BUY';
+        if (contactOwner && contactOwner !== '') {
+            contactBtn.onclick = function() {
+                window.open(`https://t.me/${contactOwner}`, '_blank');
+                showToast(`📧 Opening @${contactOwner}`, false);
+            };
+        } else {
+            contactBtn.onclick = function() {
+                showToast('❌ Owner username not configured. Set it in Settings.', true);
+            };
+        }
+        
+        const dashboardContactBtn = document.getElementById('contactOwnerDashboardBtn');
+        if (dashboardContactBtn) {
+            dashboardContactBtn.textContent = '📧 DM TO BUY';
+            if (contactOwner && contactOwner !== '') {
+                dashboardContactBtn.onclick = function() {
+                    window.open(`https://t.me/${contactOwner}`, '_blank');
+                    showToast(`📧 Opening @${contactOwner}`, false);
+                };
+            } else {
+                dashboardContactBtn.onclick = function() {
+                    showToast('❌ Owner username not configured. Set it in Settings.', true);
+                };
+            }
+        }
+        
+        const createAccountBtn = document.getElementById('createAccountBtn');
+        const contactOwnerDashboard = document.getElementById('contactOwnerDashboard');
+        
+        if (settings.signup_enabled !== undefined) {
+            signupEnabled = settings.signup_enabled;
+            if (signupEnabled) {
+                createAccountBtn.style.display = 'block';
+                if (contactOwnerDashboard) contactOwnerDashboard.style.display = 'none';
+            } else {
+                createAccountBtn.style.display = 'none';
+                if (contactOwnerDashboard) contactOwnerDashboard.style.display = 'block';
+            }
+        }
+    }
+
+    async function fetchStorage() {
+        try {
+            const data = await apiCall('/api/storage');
+            storageInfo = data.storage || {};
+            updateStorageDisplay();
+        } catch(e) {
+            console.error('Error fetching storage:', e);
+        }
+    }
+
+    function updateStorageDisplay() {
+        const used = storageInfo.used_mb || 0;
+        const max = storageInfo.max_mb || 480;
+        const percent = storageInfo.percent || 0;
+        
+        document.getElementById('storageText').textContent = `${used.toFixed(1)} MB / ${max.toFixed(1)} MB (${percent.toFixed(1)}%)`;
+        
+        const bar = document.getElementById('storageBar');
+        bar.style.width = Math.min(percent, 100) + '%';
+        if (percent > 80) {
+            bar.classList.add('warning');
+        } else {
+            bar.classList.remove('warning');
+        }
+    }
+
+    function openSettings() {
+        document.getElementById('profileDropdown').classList.remove('open');
+        const currentSignup = settings.signup_enabled !== undefined ? settings.signup_enabled : true;
+        const currentPopup = settings.telegram_popup !== undefined ? settings.telegram_popup : true;
+        const currentLink = settings.telegram_link || 'https://t.me/+m0R5z1yhmCtiZjQ9';
+        
+        showCustomModal('⚙ Settings',
+            '<div style="margin-bottom:10px;">' +
+            '<label style="font-size:0.6rem;opacity:0.4;display:block;margin-bottom:4px;">👑 Set Contact Username</label>' +
+            '<input type="text" id="settingsContactOwner" value="' + (settings.contact_owner || '') + '" placeholder="Username (without @)" style="font-size:0.7rem;">' +
+            '<p style="font-size:0.45rem;opacity:0.2;margin-top:4px;">This will set the Contact Owner username</p>' +
+            '</div>' +
+            '<div style="margin-bottom:10px;">' +
+            '<label style="font-size:0.6rem;opacity:0.4;display:block;margin-bottom:4px;">Signup Status</label>' +
+            '<div style="display:flex;gap:8px;">' +
+            '<button class="dashboard-btn ' + (currentSignup ? 'green' : 'red') + '" id="settingsToggleSignup" style="flex:1;padding:8px;font-size:0.55rem;">' + (currentSignup ? '🟢 Signup ON' : '🔴 Signup OFF') + '</button>' +
+            '</div>' +
+            '</div>' +
+            '<div style="margin-bottom:10px;">' +
+            '<label style="font-size:0.6rem;opacity:0.4;display:block;margin-bottom:4px;">Telegram Popup</label>' +
+            '<div style="display:flex;gap:8px;">' +
+            '<button class="dashboard-btn ' + (currentPopup ? 'green' : 'red') + '" id="settingsTogglePopup" style="flex:1;padding:8px;font-size:0.55rem;">' + (currentPopup ? '🟢 Popup ON' : '🔴 Popup OFF') + '</button>' +
+            '</div>' +
+            '</div>' +
+            '<div style="margin-bottom:10px;">' +
+            '<label style="font-size:0.6rem;opacity:0.4;display:block;margin-bottom:4px;">Telegram Link</label>' +
+            '<input type="text" id="settingsTelegramLink" value="' + currentLink + '" placeholder="https://t.me/..." style="font-size:0.7rem;">' +
+            '</div>',
+            'SAVE', async function() {
+                const contactOwner = document.getElementById('settingsContactOwner').value.trim();
+                const newSignup = settings.signup_enabled !== undefined ? !settings.signup_enabled : false;
+                const newPopup = settings.telegram_popup !== undefined ? !settings.telegram_popup : false;
+                const newLink = document.getElementById('settingsTelegramLink').value.trim();
+                
+                try {
+                    let updates = { signup_enabled: newSignup, telegram_popup: newPopup };
+                    
+                    if (contactOwner) {
+                        updates.contact_owner = contactOwner.replace('@', '').trim();
+                    }
+                    
+                    if (newLink) {
+                        updates.telegram_link = newLink;
+                    }
+                    
+                    await apiCall('/api/settings', 'PUT', updates);
+                    settings = { ...settings, ...updates };
+                    updateContactOwnerVisibility();
+                    showToast('✅ Settings saved', false);
+                    closeModal();
+                } catch(e) {
+                    showToast('❌ ' + e.message, true);
+                }
+            });
+        
+        setTimeout(() => {
+            const toggleBtn = document.getElementById('settingsToggleSignup');
+            if (toggleBtn) {
+                toggleBtn.onclick = function() {
+                    const isOn = this.textContent.includes('ON');
+                    this.textContent = isOn ? '🔴 Signup OFF' : '🟢 Signup ON';
+                    this.className = 'dashboard-btn ' + (isOn ? 'red' : 'green');
+                    settings.signup_enabled = !isOn;
+                };
+            }
+            const popupBtn = document.getElementById('settingsTogglePopup');
+            if (popupBtn) {
+                popupBtn.onclick = function() {
+                    const isOn = this.textContent.includes('ON');
+                    this.textContent = isOn ? '🔴 Popup OFF' : '🟢 Popup ON';
+                    this.className = 'dashboard-btn ' + (isOn ? 'red' : 'green');
+                    settings.telegram_popup = !isOn;
+                };
+            }
+        }, 100);
     }
 
     async function fetchFiles() {
@@ -3381,7 +3357,6 @@ HTML_TEMPLATE = '''
             files = data.files || [];
             renderFiles();
             updateStats();
-            fetchStorageStats();
         } catch(e) {
             console.error('Error fetching files:', e);
         }
@@ -3389,7 +3364,6 @@ HTML_TEMPLATE = '''
 
     async function fetchAllFiles() {
         try {
-            if (currentRole !== 'owner') return;
             const data = await apiCall('/api/all-files');
             allFiles = data.files || [];
             renderAllFiles();
@@ -3414,7 +3388,9 @@ HTML_TEMPLATE = '''
             const data = await apiCall('/api/processes');
             processes = data.processes || [];
             document.getElementById('processCount').textContent = processes.length;
+            document.getElementById('botStatus').textContent = processes.length;
             updateStats();
+            updateRunningNodes();
             updateMyNodes();
         } catch(e) {
             console.error('Error fetching processes:', e);
@@ -3427,6 +3403,7 @@ HTML_TEMPLATE = '''
         document.getElementById('runningCount').textContent = running;
         document.getElementById('stoppedCount').textContent = stopped;
         document.getElementById('fileCount').textContent = files.length;
+        document.getElementById('fileCountStatus').textContent = files.length;
     }
 
     function renderFiles() {
@@ -3438,8 +3415,10 @@ HTML_TEMPLATE = '''
         let html = '';
         files.forEach(f => {
             const statusClass = f.status === 'running' ? 'running' : 'stopped';
+            const hasBot = f.has_token || false;
+            const botUsername = f.bot_username || null;
             html += `
-                <div class="file-item" data-file-id="${f.id}">
+                <div class="file-item" data-file-id="${f.id}" data-filename="${f.filename}">
                     <div class="file-info">
                         <span class="name">${escapeHtml(f.filename)}</span>
                         <span class="size">${(f.size / 1024).toFixed(1)} KB</span>
@@ -3453,6 +3432,7 @@ HTML_TEMPLATE = '''
                         <button class="btn-sm download" onclick="window.downloadFile('${f.id}')">⬇ Download</button>
                         <button class="btn-sm" onclick="window.editFile('${f.id}')">✏️ Edit</button>
                         <button class="btn-sm red" onclick="window.deleteFile('${f.id}')">🗑</button>
+                        ${hasBot && botUsername ? `<button class="btn-sm white" onclick="window.openBot('${botUsername}')">🤖 Open Bot</button>` : ''}
                     </div>
                 </div>
             `;
@@ -3469,6 +3449,8 @@ HTML_TEMPLATE = '''
         let html = '';
         allFiles.forEach(f => {
             const statusClass = f.status === 'running' ? 'running' : 'stopped';
+            const hasBot = f.has_token || false;
+            const botUsername = f.bot_username || null;
             html += `
                 <tr>
                     <td>${escapeHtml(f.filename)}</td>
@@ -3476,7 +3458,7 @@ HTML_TEMPLATE = '''
                     <td>${(f.size / 1024).toFixed(1)} KB</td>
                     <td><span class="status-badge ${statusClass}">${f.status || 'stopped'}</span></td>
                     <td>
-                        <div class="action-btns" style="display:flex;gap:4px;flex-wrap:wrap;">
+                        <div class="action-btns">
                             ${f.status !== 'running' ? `<button class="btn-sm green" onclick="window.startFile('${f.id}')">▶</button>` : ''}
                             ${f.status === 'running' ? `<button class="btn-sm orange" onclick="window.stopFile('${f.id}')">■</button>` : ''}
                             <button class="btn-sm blue" onclick="window.restartFile('${f.id}')">↻</button>
@@ -3487,6 +3469,7 @@ HTML_TEMPLATE = '''
                             <button class="btn-sm" onclick="window.duplicateFile('${f.id}')">📋</button>
                             <button class="btn-sm blue" onclick="window.fileDetails('${f.id}')">ℹ️</button>
                             <button class="btn-sm red" onclick="window.deleteFile('${f.id}')">🗑</button>
+                            ${hasBot && botUsername ? `<button class="btn-sm white" onclick="window.openBot('${botUsername}')">🤖</button>` : ''}
                         </div>
                     </td>
                 </tr>
@@ -3507,16 +3490,17 @@ HTML_TEMPLATE = '''
             const isOwner = u.role === 'owner';
             const isSelf = u.username === currentUser;
             html += `
-                <div class="user-card" style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;margin:4px 0;border:1px solid rgba(0,255,136,0.08);border-radius:6px;background:rgba(0,0,0,0.2);flex-wrap:wrap;gap:6px;">
-                    <div class="user-data" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;font-size:0.65rem;">
-                        <span class="username" style="color:#00ff88;font-weight:600;">${escapeHtml(u.username)}</span>
-                        <span class="password" style="opacity:0.5;font-size:0.55rem;">${escapeHtml(u.password)}</span>
-                        <span class="role-badge ${roleClass}" style="font-size:0.4rem;padding:2px 10px;border-radius:12px;border:1px solid;text-transform:uppercase;">${(u.role || 'user').toUpperCase()}</span>
+                <div class="user-card">
+                    <div class="user-data">
+                        <span class="username">${escapeHtml(u.username)}</span>
+                        <span class="password">${escapeHtml(u.password)}</span>
+                        <span class="role-badge ${roleClass}">${(u.role || 'user').toUpperCase()}</span>
+                        ${u.created ? `<span style="opacity:0.3;font-size:0.45rem;">${new Date(u.created).toLocaleDateString()}</span>` : ''}
                         ${isSelf ? '<span style="opacity:0.2;font-size:0.4rem;">(You)</span>' : ''}
                     </div>
                     <div class="user-actions">
                         ${!isOwner && !isSelf && (currentRole === 'owner' || (currentRole === 'admin' && u.role !== 'admin')) ? 
-                            `<button class="btn-sm" style="padding:2px 10px;font-size:0.45rem;border:1px solid rgba(255,68,102,0.2);border-radius:4px;background:transparent;color:#ff4466;cursor:pointer;font-family:'Orbitron','Courier New',monospace;" onclick="window.removeUser('${u.username}')">Remove</button>` : ''}
+                            `<button class="btn-sm" onclick="window.removeUser('${u.username}')">Remove</button>` : ''}
                     </div>
                 </div>
             `;
@@ -3535,13 +3519,34 @@ HTML_TEMPLATE = '''
         admins.forEach(u => {
             const roleClass = u.role || 'admin';
             html += `
-                <div class="user-item" style="display:flex;justify-content:space-between;align-items:center;padding:6px 10px;margin:2px 0;border:1px solid rgba(0,255,136,0.06);border-radius:6px;background:rgba(0,0,0,0.2);">
-                    <div class="user-info" style="display:flex;align-items:center;gap:8px;font-size:0.7rem;flex-wrap:wrap;">
-                        <span class="uname" style="color:#00ff88;">${escapeHtml(u.username)}</span>
-                        <span class="role-badge ${roleClass}" style="font-size:0.4rem;padding:2px 10px;border-radius:12px;border:1px solid;text-transform:uppercase;">${(u.role || 'admin').toUpperCase()}</span>
+                <div class="user-item">
+                    <div class="user-info">
+                        <span class="uname">${escapeHtml(u.username)}</span>
+                        <span class="role-badge ${roleClass}">${(u.role || 'admin').toUpperCase()}</span>
+                        <span class="created">${u.created ? new Date(u.created).toLocaleDateString() : ''}</span>
                     </div>
                 </div>
             `;
+        });
+        container.innerHTML = html;
+    }
+
+    function updateRunningNodes() {
+        const container = document.getElementById('runningNodesList');
+        if (processes.length === 0) {
+            container.innerHTML = '<div style="opacity:0.3;text-align:center;padding:10px;font-size:0.7rem;">No nodes running</div>';
+            return;
+        }
+        let html = '';
+        processes.forEach(n => {
+            html += `<div class="node-item">
+                <span><span class="status-dot running"></span> ${escapeHtml(n.filename)}</span>
+                <span style="opacity:0.4;font-size:0.55rem;">PID: ${n.pid}</span>
+                <span>
+                    <button class="btn-sm orange" onclick="window.stopNode('${n.id}')">■ Stop</button>
+                    <button class="btn-sm red" onclick="window.deleteNode('${n.id}')">🗑</button>
+                </span>
+            </div>`;
         });
         container.innerHTML = html;
     }
@@ -3554,24 +3559,30 @@ HTML_TEMPLATE = '''
         }
         let html = '';
         processes.forEach(n => {
-            html += `<div class="node-item" style="display:flex;justify-content:space-between;align-items:center;padding:2px 0;border-bottom:1px solid rgba(0,255,136,0.04);">
-                <span><span class="status-dot running" style="display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:8px;background:#00ff88;"></span> ${escapeHtml(n.filename)}</span>
+            html += `<div class="node-item">
+                <span><span class="status-dot running"></span> ${escapeHtml(n.filename)}</span>
                 <span style="opacity:0.4;font-size:0.55rem;">PID: ${n.pid}</span>
                 <span>
-                    <button class="btn-sm orange" style="padding:2px 8px;font-size:0.45rem;border:1px solid rgba(0,255,136,0.15);border-radius:4px;background:transparent;color:#00ff88;cursor:pointer;font-family:'Orbitron','Courier New',monospace;" onclick="window.stopNode('${n.id}')">■ Stop</button>
+                    <button class="btn-sm orange" onclick="window.stopNode('${n.id}')">■ Stop</button>
+                    <button class="btn-sm red" onclick="window.deleteNode('${n.id}')">🗑</button>
                 </span>
             </div>`;
         });
         container.innerHTML = html;
     }
 
+    // ============================================================
+    // WINDOW FUNCTIONS
+    // ============================================================
+
     window.startFile = async function(fileId) {
         try {
+            showToast('▶ Starting...', false);
             await apiCall(`/api/files/start/${fileId}`, 'POST');
-            showToast('✅ Started');
-            fetchFiles();
-            if (currentRole === 'owner') fetchAllFiles();
-            fetchProcesses();
+            showToast('✅ Started', false);
+            await fetchFiles();
+            await fetchAllFiles();
+            await fetchProcesses();
         } catch(e) {
             showToast('❌ ' + e.message, true);
         }
@@ -3579,11 +3590,12 @@ HTML_TEMPLATE = '''
 
     window.stopFile = async function(fileId) {
         try {
+            showToast('■ Stopping...', false);
             await apiCall(`/api/files/stop/${fileId}`, 'POST');
-            showToast('✅ Stopped');
-            fetchFiles();
-            if (currentRole === 'owner') fetchAllFiles();
-            fetchProcesses();
+            showToast('✅ Stopped', false);
+            await fetchFiles();
+            await fetchAllFiles();
+            await fetchProcesses();
         } catch(e) {
             showToast('❌ ' + e.message, true);
         }
@@ -3591,12 +3603,13 @@ HTML_TEMPLATE = '''
 
     window.restartFile = async function(fileId) {
         try {
+            showToast('↻ Restarting...', false);
             await apiCall(`/api/files/stop/${fileId}`, 'POST');
             await apiCall(`/api/files/start/${fileId}`, 'POST');
-            showToast('✅ Restarted');
-            fetchFiles();
-            if (currentRole === 'owner') fetchAllFiles();
-            fetchProcesses();
+            showToast('✅ Restarted', false);
+            await fetchFiles();
+            await fetchAllFiles();
+            await fetchProcesses();
         } catch(e) {
             showToast('❌ ' + e.message, true);
         }
@@ -3624,15 +3637,21 @@ HTML_TEMPLATE = '''
                 throw new Error(err.error || 'Download failed');
             }
             const blob = await response.blob();
+            const contentDisposition = response.headers.get('Content-Disposition');
+            let filename = 'downloaded_file';
+            if (contentDisposition) {
+                const match = contentDisposition.match(/filename="(.+)"/);
+                if (match) filename = match[1];
+            }
             const url = window.URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = 'downloaded_file';
+            a.download = filename;
             document.body.appendChild(a);
             a.click();
             a.remove();
             window.URL.revokeObjectURL(url);
-            showToast('⬇ Download started');
+            showToast('⬇ Download started', false);
         } catch(e) {
             showToast('❌ ' + e.message, true);
         }
@@ -3640,15 +3659,17 @@ HTML_TEMPLATE = '''
 
     window.deleteFile = async function(fileId) {
         showCustomModal('🗑 Delete File', 
-            '<p style="opacity:0.6;text-align:center;font-size:0.8rem;">Delete this file?</p>',
+            '<p style="opacity:0.6;text-align:center;font-size:0.8rem;">This will STOP the process and DELETE the file.<br>A backup will be created before deletion.<br>Are you sure?</p>',
             'YES, DELETE', async function() {
                 try {
+                    showToast('🗑 Deleting...', false);
                     await apiCall(`/api/files/delete/${fileId}`, 'DELETE');
-                    showToast('✅ Deleted');
+                    showToast('✅ Deleted', false);
                     closeModal();
-                    fetchFiles();
-                    if (currentRole === 'owner') fetchAllFiles();
-                    fetchProcesses();
+                    await fetchFiles();
+                    await fetchAllFiles();
+                    await fetchProcesses();
+                    await fetchStorage();
                 } catch(e) {
                     showToast('❌ ' + e.message, true);
                 }
@@ -3660,13 +3681,18 @@ HTML_TEMPLATE = '''
             const data = await apiCall(`/api/files/content/${fileId}`, 'GET');
             const content = data.content || '';
             showCustomModal('✏️ Edit File',
-                '<textarea id="editFileContent" rows="10" class="code-editor" style="font-family:\'Courier New\',monospace;font-size:0.65rem;background:#050807;color:#00ff88;border:1px solid rgba(0,255,136,0.15);border-radius:6px;padding:10px;width:100%;min-height:150px;">' + 
-                escapeHtml(content) + '</textarea>',
+                '<div style="position:relative;">' +
+                '<div style="display:flex;gap:6px;margin-bottom:6px;flex-wrap:wrap;">' +
+                '<button class="btn-sm" id="clearEditorBtn" style="padding:4px 12px;font-size:0.45rem;border:1px solid rgba(255,68,102,0.2);color:#ff4466;background:transparent;border-radius:4px;cursor:pointer;">✕ Clear</button>' +
+                '<button class="btn-sm" id="copyEditorBtn" style="padding:4px 12px;font-size:0.45rem;border:1px solid rgba(51,221,255,0.2);color:#33ddff;background:transparent;border-radius:4px;cursor:pointer;">📋 Copy</button>' +
+                '</div>' +
+                '<textarea id="editFileContent" rows="12" class="code-editor" style="min-height:200px;width:100%;">' + 
+                escapeHtml(content) + '</textarea></div>',
                 'SAVE', async function() {
                     const content = document.getElementById('editFileContent').value;
                     try {
                         await apiCall(`/api/files/content/${fileId}`, 'PUT', { content: content });
-                        showToast('✅ File saved');
+                        showToast('✅ File saved', false);
                         closeModal();
                         fetchFiles();
                         if (currentRole === 'owner') fetchAllFiles();
@@ -3674,6 +3700,33 @@ HTML_TEMPLATE = '''
                         showToast('❌ ' + e.message, true);
                     }
                 });
+            setTimeout(() => {
+                const clearBtn = document.getElementById('clearEditorBtn');
+                if (clearBtn) {
+                    clearBtn.onclick = function() {
+                        document.getElementById('editFileContent').value = '';
+                        showToast('🧹 Editor cleared', false);
+                    };
+                }
+                const copyBtn = document.getElementById('copyEditorBtn');
+                if (copyBtn) {
+                    copyBtn.onclick = function() {
+                        const textarea = document.getElementById('editFileContent');
+                        textarea.select();
+                        try {
+                            navigator.clipboard.writeText(textarea.value).then(() => {
+                                showToast('📋 Copied to clipboard!', false);
+                            }).catch(() => {
+                                document.execCommand('copy');
+                                showToast('📋 Copied!', false);
+                            });
+                        } catch(e) {
+                            document.execCommand('copy');
+                            showToast('📋 Copied!', false);
+                        }
+                    };
+                }
+            }, 100);
         } catch(e) {
             showToast('❌ ' + e.message, true);
         }
@@ -3683,13 +3736,13 @@ HTML_TEMPLATE = '''
         const file = files.find(f => f.id === fileId) || allFiles.find(f => f.id === fileId);
         const oldName = file ? file.filename : 'file';
         showCustomModal('✏️ Rename File',
-            '<div><input type="text" id="renameFileInput" value="' + escapeHtml(oldName) + '" style="font-size:0.7rem;width:100%;background:rgba(0,0,0,0.6);border:1.5px solid rgba(0,255,136,0.15);color:#00ff88;padding:10px 12px;border-radius:8px;font-family:\'Orbitron\',\'Courier New\',monospace;"></div>',
+            '<div><input type="text" id="renameFileInput" value="' + escapeHtml(oldName) + '" style="font-size:0.7rem;"></div>',
             'RENAME', async function() {
                 const newName = document.getElementById('renameFileInput').value.trim();
                 if (!newName) { showToast('❌ Name required', true); return; }
                 try {
                     await apiCall(`/api/files/rename/${fileId}`, 'POST', { new_name: newName });
-                    showToast('✅ Renamed');
+                    showToast('✅ Renamed', false, newName);
                     closeModal();
                     fetchFiles();
                     if (currentRole === 'owner') fetchAllFiles();
@@ -3702,7 +3755,7 @@ HTML_TEMPLATE = '''
     window.duplicateFile = async function(fileId) {
         try {
             await apiCall(`/api/files/duplicate/${fileId}`, 'POST');
-            showToast('✅ Duplicated');
+            showToast('✅ Duplicated', false);
             fetchFiles();
             if (currentRole === 'owner') fetchAllFiles();
         } catch(e) {
@@ -3715,10 +3768,14 @@ HTML_TEMPLATE = '''
             const data = await apiCall(`/api/files/details/${fileId}`, 'GET');
             const details = data.details || {};
             showCustomModal('ℹ️ File Details',
-                '<div class="file-details-grid" style="display:grid;grid-template-columns:1fr 2fr;gap:6px 12px;font-size:0.65rem;margin:10px 0;">' +
-                '<span class="label" style="opacity:0.4;">Name:</span><span class="value" style="color:#00ff88;">' + escapeHtml(details.filename || '') + '</span>' +
-                '<span class="label" style="opacity:0.4;">Size:</span><span class="value" style="color:#00ff88;">' + formatFileSize(details.size || 0) + '</span>' +
-                '<span class="label" style="opacity:0.4;">Owner:</span><span class="value" style="color:#00ff88;">' + escapeHtml(details.owner || '') + '</span>' +
+                '<div class="file-details-grid">' +
+                '<span class="label">Name:</span><span class="value">' + escapeHtml(details.filename || '') + '</span>' +
+                '<span class="label">Size:</span><span class="value">' + formatFileSize(details.size || 0) + '</span>' +
+                '<span class="label">Created:</span><span class="value">' + (details.created ? new Date(details.created).toLocaleString() : '') + '</span>' +
+                '<span class="label">Modified:</span><span class="value">' + (details.modified ? new Date(details.modified).toLocaleString() : '') + '</span>' +
+                '<span class="label">Path:</span><span class="value" style="font-size:0.5rem;">' + escapeHtml(details.path || '') + '</span>' +
+                '<span class="label">Owner:</span><span class="value">' + escapeHtml(details.owner || '') + '</span>' +
+                (details.has_token ? '<span class="label">Bot:</span><span class="value">@' + escapeHtml(details.bot_username || '') + '</span>' : '') +
                 '</div>',
                 'Close');
         } catch(e) {
@@ -3726,16 +3783,44 @@ HTML_TEMPLATE = '''
         }
     };
 
+    window.openBot = function(botUsername) {
+        if (botUsername) {
+            window.open(`https://t.me/${botUsername}`, '_blank');
+            showToast(`🤖 Opening @${botUsername}`, false);
+        } else {
+            showToast('❌ No bot username available', true);
+        }
+    };
+
     window.stopNode = async function(fileId) {
         try {
+            showToast('■ Stopping...', false);
             await apiCall(`/api/files/stop/${fileId}`, 'POST');
-            showToast('✅ Stopped');
-            fetchFiles();
-            if (currentRole === 'owner') fetchAllFiles();
-            fetchProcesses();
+            showToast('✅ Stopped', false);
+            await fetchFiles();
+            await fetchAllFiles();
+            await fetchProcesses();
         } catch(e) {
             showToast('❌ ' + e.message, true);
         }
+    };
+
+    window.deleteNode = async function(fileId) {
+        showCustomModal('🗑 Delete Process', 
+            '<p style="opacity:0.6;text-align:center;font-size:0.8rem;">This will STOP the process.<br>Are you sure?</p>',
+            'YES, STOP', async function() {
+                try {
+                    showToast('■ Stopping...', false);
+                    await apiCall(`/api/files/stop/${fileId}`, 'POST');
+                    showToast('✅ Stopped', false);
+                    closeModal();
+                    await fetchFiles();
+                    await fetchAllFiles();
+                    await fetchProcesses();
+                } catch(e) {
+                    showToast('❌ ' + e.message, true);
+                }
+            });
     };
 
     window.removeUser = async function(username) {
@@ -3744,11 +3829,11 @@ HTML_TEMPLATE = '''
             return;
         }
         showCustomModal('🗑 Remove User', 
-            '<p style="opacity:0.6;text-align:center;font-size:0.8rem;">Remove user <strong>' + escapeHtml(username) + '</strong>?</p>',
+            '<p style="opacity:0.6;text-align:center;font-size:0.8rem;">Are you sure you want to remove user <strong>' + escapeHtml(username) + '</strong>?<br>This will delete all their files.</p>',
             'YES, REMOVE', async function() {
                 try {
                     await apiCall('/api/users/remove', 'POST', { username: username });
-                    showToast('✅ User removed');
+                    showToast('✅ User removed', false, username);
                     closeModal();
                     fetchUsers();
                 } catch(e) {
@@ -3756,6 +3841,136 @@ HTML_TEMPLATE = '''
                 }
             });
     };
+
+    // ============================================================
+    // CONTEXT MENU
+    // ============================================================
+
+    document.addEventListener('contextmenu', function(e) {
+        e.preventDefault();
+        return false;
+    });
+
+    let longPressTimer = null;
+    let longPressTarget = null;
+
+    document.addEventListener('touchstart', function(e) {
+        const target = e.target.closest('.folder-item, .file-item');
+        if (target) {
+            longPressTarget = target;
+            longPressTimer = setTimeout(function() {
+                if (longPressTarget) {
+                    const fileId = longPressTarget.dataset.fileId;
+                    const filename = longPressTarget.dataset.filename;
+                    const isDir = longPressTarget.dataset.isDir === 'true';
+                    const hasToken = longPressTarget.dataset.hasToken === 'true';
+                    const botUsername = longPressTarget.dataset.botUsername || null;
+                    
+                    contextTargetFileId = fileId;
+                    contextTargetFileName = filename;
+                    contextTargetIsDir = isDir;
+                    
+                    const menu = document.getElementById('contextMenu');
+                    const touch = e.touches ? e.touches[0] : e;
+                    const x = touch.clientX || 0;
+                    const y = touch.clientY || 0;
+                    menu.style.left = Math.min(x, window.innerWidth - 200) + 'px';
+                    menu.style.top = Math.min(y, window.innerHeight - 300) + 'px';
+                    menu.classList.add('open');
+                    
+                    const openBotItem = menu.querySelector('[data-action="openbot"]');
+                    if (hasToken && botUsername) {
+                        openBotItem.style.display = '';
+                        openBotItem.textContent = `🤖 Open @${botUsername}`;
+                    } else {
+                        openBotItem.style.display = 'none';
+                    }
+                    
+                    const openItem = menu.querySelector('[data-action="open"]');
+                    if (isDir) {
+                        openItem.style.display = '';
+                    } else {
+                        openItem.style.display = 'none';
+                    }
+                    
+                    if (navigator.vibrate) {
+                        navigator.vibrate(20);
+                    }
+                }
+            }, 500);
+        }
+    }, { passive: true });
+
+    document.addEventListener('touchmove', function(e) {
+        clearTimeout(longPressTimer);
+        longPressTarget = null;
+    }, { passive: true });
+
+    document.addEventListener('touchend', function(e) {
+        clearTimeout(longPressTimer);
+        longPressTarget = null;
+    }, { passive: true });
+
+    document.getElementById('contextMenu').addEventListener('click', function(e) {
+        const action = e.target.dataset.action;
+        if (!action || !contextTargetFileId) {
+            document.getElementById('contextMenu').classList.remove('open');
+            return;
+        }
+        
+        const fileId = contextTargetFileId;
+        const isDir = contextTargetIsDir;
+        document.getElementById('contextMenu').classList.remove('open');
+        
+        switch(action) {
+            case 'open':
+                if (isDir) {
+                    window.openFolder(contextTargetFileName);
+                }
+                break;
+            case 'start':
+                window.startFile(fileId);
+                break;
+            case 'stop':
+                window.stopFile(fileId);
+                break;
+            case 'download':
+                window.downloadFile(fileId);
+                break;
+            case 'edit':
+                window.editFile(fileId);
+                break;
+            case 'rename':
+                window.renameFile(fileId);
+                break;
+            case 'details':
+                window.fileDetails(fileId);
+                break;
+            case 'openbot':
+                const botItem = document.getElementById('contextMenu').querySelector('[data-action="openbot"]');
+                const botUsername = botItem ? botItem.textContent.replace('🤖 Open @', '').trim() : null;
+                if (botUsername) {
+                    window.openBot(botUsername);
+                } else {
+                    showToast('❌ No bot info available', true);
+                }
+                break;
+            case 'delete':
+                window.deleteFile(fileId);
+                break;
+        }
+    });
+
+    document.addEventListener('click', function(e) {
+        const menu = document.getElementById('contextMenu');
+        if (menu && !menu.contains(e.target)) {
+            menu.classList.remove('open');
+        }
+    });
+
+    // ============================================================
+    // FOLDER MANAGER
+    // ============================================================
 
     async function loadFolder(path) {
         try {
@@ -3792,21 +4007,29 @@ HTML_TEMPLATE = '''
         items.forEach(item => {
             const icon = item.is_dir ? '📁' : '📄';
             const size = item.is_dir ? '' : formatFileSize(item.size);
+            const modified = item.modified ? new Date(item.modified).toLocaleDateString() : '';
             const fileId = item.path.split('/').pop().split('_')[0] || item.path;
             
             html += `
-                <div class="folder-item" style="display:flex;justify-content:space-between;align-items:center;padding:6px 10px;margin:2px 0;border:1px solid rgba(0,255,136,0.06);border-radius:6px;background:rgba(0,0,0,0.2);cursor:pointer;" data-file-id="${fileId}" data-filename="${item.path}" data-is-dir="${item.is_dir}">
-                    <div class="folder-info" style="display:flex;align-items:center;gap:8px;font-size:0.7rem;flex-wrap:wrap;">
-                        <span class="icon" style="font-size:1rem;">${icon}</span>
-                        <span class="name" style="color:#33ddff;">${escapeHtml(item.name)}</span>
+                <div class="folder-item" 
+                     data-file-id="${fileId}" 
+                     data-filename="${item.path}"
+                     data-is-dir="${item.is_dir}"
+                     data-has-token="${item.has_token || false}"
+                     data-bot-username="${item.bot_username || ''}">
+                    <div class="folder-info">
+                        <span class="icon">${icon}</span>
+                        <span class="name">${escapeHtml(item.name)}</span>
                         <span style="opacity:0.3;font-size:0.5rem;">${size}</span>
+                        <span style="opacity:0.2;font-size:0.45rem;">${modified}</span>
+                        ${item.has_token ? '<span style="color:#33ddff;font-size:0.4rem;">🤖 BOT</span>' : ''}
                     </div>
-                    <div class="folder-actions" style="display:flex;gap:4px;flex-wrap:wrap;">
+                    <div class="folder-actions">
                         ${item.is_dir ? 
-                            `<button class="btn-sm blue" style="padding:2px 8px;font-size:0.4rem;border:1px solid rgba(0,255,136,0.15);border-radius:4px;background:transparent;color:#00ff88;cursor:pointer;font-family:'Orbitron','Courier New',monospace;" onclick="window.openFolder('${item.path}')">📂 Open</button>` : 
-                            `<button class="btn-sm download" style="padding:2px 8px;font-size:0.4rem;border:1px solid rgba(0,255,136,0.15);border-radius:4px;background:transparent;color:#33ddff;cursor:pointer;font-family:'Orbitron','Courier New',monospace;" onclick="window.downloadFile('${fileId}')">⬇ Download</button>
-                             <button class="btn-sm blue" style="padding:2px 8px;font-size:0.4rem;border:1px solid rgba(0,255,136,0.15);border-radius:4px;background:transparent;color:#33ddff;cursor:pointer;font-family:'Orbitron','Courier New',monospace;" onclick="window.fileDetails('${fileId}')">ℹ️</button>
-                             <button class="btn-sm red" style="padding:2px 8px;font-size:0.4rem;border:1px solid rgba(255,68,102,0.2);border-radius:4px;background:transparent;color:#ff4466;cursor:pointer;font-family:'Orbitron','Courier New',monospace;" onclick="window.deleteFile('${fileId}')">🗑</button>`
+                            `<button class="btn-sm blue" onclick="window.openFolder('${item.path}')">📂 Open</button>` : 
+                            `<button class="btn-sm download" onclick="window.downloadFile('${fileId}')">⬇ Download</button>
+                             <button class="btn-sm blue" onclick="window.fileDetails('${fileId}')">ℹ️</button>
+                             <button class="btn-sm red" onclick="window.deleteFile('${fileId}')">🗑</button>`
                         }
                     </div>
                 </div>
@@ -3817,7 +4040,7 @@ HTML_TEMPLATE = '''
         
         container.querySelectorAll('.folder-item[data-is-dir="true"]').forEach(el => {
             el.addEventListener('click', function(e) {
-                if (!e.target.closest('.folder-actions')) {
+                if (!e.target.closest('.folder-actions') && !e.target.closest('.context-menu')) {
                     window.openFolder(this.dataset.filename);
                 }
             });
@@ -3827,13 +4050,13 @@ HTML_TEMPLATE = '''
     function updateBreadcrumb() {
         const nav = document.getElementById('folderNav');
         const parts = currentFolderPath.split('/').filter(p => p);
-        let html = '<span class="crumb" data-path="" style="color:#33ddff;cursor:pointer;opacity:0.6;">📁 Root</span>';
+        let html = '<span class="crumb" data-path="">📁 Root</span>';
         let path = '';
         parts.forEach((part, index) => {
             path += (index > 0 ? '/' : '') + part;
             const isLast = index === parts.length - 1;
-            html += `<span class="separator" style="opacity:0.2;padding:0 2px;">/</span>`;
-            html += `<span class="crumb ${isLast ? 'current' : ''}" data-path="${path}" style="color:#33ddff;cursor:pointer;opacity:${isLast ? '1' : '0.6'};${isLast ? 'color:#00ff88;' : ''}">${escapeHtml(part)}</span>`;
+            html += `<span class="separator">/</span>`;
+            html += `<span class="crumb ${isLast ? 'current' : ''}" data-path="${path}">${escapeHtml(part)}</span>`;
         });
         nav.innerHTML = html;
         
@@ -3850,7 +4073,7 @@ HTML_TEMPLATE = '''
 
     async function createFolder() {
         showCustomModal('📁 Create Folder',
-            '<div><input type="text" id="newFolderName" placeholder="Folder name" style="font-size:0.7rem;width:100%;background:rgba(0,0,0,0.6);border:1.5px solid rgba(0,255,136,0.15);color:#00ff88;padding:10px 12px;border-radius:8px;font-family:\'Orbitron\',\'Courier New\',monospace;"></div>',
+            '<div><input type="text" id="newFolderName" placeholder="Folder name" style="font-size:0.7rem;"></div>',
             'CREATE', async function() {
                 const name = document.getElementById('newFolderName').value.trim();
                 if (!name) { showToast('❌ Folder name required', true); return; }
@@ -3859,7 +4082,7 @@ HTML_TEMPLATE = '''
                         path: currentFolderPath, 
                         name: name 
                     });
-                    showToast('✅ Folder created');
+                    showToast('✅ Folder created', false, name);
                     closeModal();
                     loadFolder(currentFolderPath);
                 } catch(e) {
@@ -3870,8 +4093,8 @@ HTML_TEMPLATE = '''
 
     async function createFile() {
         showCustomModal('📄 Create File',
-            '<div style="margin-bottom:8px;"><input type="text" id="newFileName" placeholder="File name" style="font-size:0.7rem;width:100%;background:rgba(0,0,0,0.6);border:1.5px solid rgba(0,255,136,0.15);color:#00ff88;padding:10px 12px;border-radius:8px;font-family:\'Orbitron\',\'Courier New\',monospace;"></div>' +
-            '<div><textarea id="newFileContent" rows="6" placeholder="File content..." style="font-size:0.65rem;min-height:80px;width:100%;background:rgba(0,0,0,0.6);border:1.5px solid rgba(0,255,136,0.15);color:#00ff88;padding:10px 12px;border-radius:8px;font-family:\'Courier New\',monospace;resize:vertical;"></textarea></div>',
+            '<div style="margin-bottom:8px;"><input type="text" id="newFileName" placeholder="File name" style="font-size:0.7rem;"></div>' +
+            '<div><textarea id="newFileContent" rows="6" placeholder="File content..." style="font-size:0.65rem;min-height:80px;"></textarea></div>',
             'CREATE', async function() {
                 const name = document.getElementById('newFileName').value.trim();
                 const content = document.getElementById('newFileContent').value;
@@ -3882,7 +4105,7 @@ HTML_TEMPLATE = '''
                         name: name,
                         content: content
                     });
-                    showToast('✅ File created');
+                    showToast('✅ File created', false, name);
                     closeModal();
                     loadFolder(currentFolderPath);
                     fetchFiles();
@@ -3893,12 +4116,16 @@ HTML_TEMPLATE = '''
             });
     }
 
+    // ============================================================
+    // TERMINAL
+    // ============================================================
+
     async function startTerminal() {
         try {
             const data = await apiCall('/api/terminal/start', 'POST', {});
             terminalSessionId = data.session_id;
-            showToast('✅ Terminal started');
-            document.getElementById('terminalOutput').innerHTML = '<div style="opacity:0.3;text-align:center;padding:10px;font-size:0.7rem;">Terminal ready.</div>';
+            showToast('✅ Terminal started', false);
+            document.getElementById('terminalOutput').innerHTML = '<div style="opacity:0.3;text-align:center;padding:10px;font-size:0.7rem;">Terminal ready. Type commands below.</div>';
             
             if (terminalEventSource) {
                 terminalEventSource.close();
@@ -3915,9 +4142,16 @@ HTML_TEMPLATE = '''
                         output.appendChild(div);
                         output.scrollTop = output.scrollHeight;
                     } else if (data.type === 'end') {
+                        const output = document.getElementById('terminalOutput');
+                        const div = document.createElement('div');
+                        div.textContent = '--- Terminal session ended ---';
+                        div.style.opacity = '0.3';
+                        output.appendChild(div);
                         terminalEventSource.close();
                     }
-                } catch(e) {}
+                } catch(e) {
+                    console.error('Terminal parse error:', e);
+                }
             };
             
             document.getElementById('terminalInput').disabled = false;
@@ -3939,7 +4173,20 @@ HTML_TEMPLATE = '''
         }
         terminalSessionId = null;
         document.getElementById('terminalInput').disabled = true;
-        showToast('🔌 Terminal stopped');
+        showToast('🔌 Terminal stopped', false);
+        const output = document.getElementById('terminalOutput');
+        const div = document.createElement('div');
+        div.textContent = '--- Terminal stopped ---';
+        div.style.opacity = '0.3';
+        output.appendChild(div);
+    }
+
+    function clearTerminal() {
+        document.getElementById('terminalOutput').innerHTML = '';
+        const div = document.createElement('div');
+        div.textContent = '--- Terminal cleared ---';
+        div.style.opacity = '0.3';
+        document.getElementById('terminalOutput').appendChild(div);
     }
 
     async function sendCommand() {
@@ -3951,6 +4198,16 @@ HTML_TEMPLATE = '''
         }
         
         try {
+            const output = document.getElementById('terminalOutput');
+            const div = document.createElement('div');
+            div.textContent = '$ ' + command;
+            div.style.color = '#33ddff';
+            output.appendChild(div);
+            output.scrollTop = output.scrollHeight;
+            
+            terminalCommandHistory.push(command);
+            terminalHistoryIndex = -1;
+            
             await apiCall('/api/terminal/command', 'POST', {
                 session_id: terminalSessionId,
                 command: command
@@ -3960,6 +4217,100 @@ HTML_TEMPLATE = '''
         } catch(e) {
             showToast('❌ ' + e.message, true);
         }
+    }
+
+    // ============================================================
+    // BACKUP FUNCTIONS
+    // ============================================================
+
+    async function createBackup() {
+        try {
+            showToast('📦 Creating backup...', false);
+            const data = await apiCall('/api/backup/create', 'POST');
+            showToast('✅ Backup created', false, data.backup);
+            loadBackups();
+        } catch(e) {
+            showToast('❌ ' + e.message, true);
+        }
+    }
+
+    async function loadBackups() {
+        try {
+            const data = await apiCall('/api/backup/list');
+            const backups = data.backups || [];
+            const container = document.getElementById('backupList');
+            
+            if (backups.length === 0) {
+                container.innerHTML = '<div style="opacity:0.3;text-align:center;padding:10px;font-size:0.7rem;">No backups found</div>';
+                return;
+            }
+            
+            let html = '';
+            backups.forEach(b => {
+                const size = formatFileSize(b.size);
+                const created = new Date(b.created).toLocaleString();
+                html += `
+                    <div class="file-item">
+                        <div class="file-info">
+                            <span class="name">📦 ${escapeHtml(b.name)}</span>
+                            <span class="size">${size}</span>
+                            <span style="opacity:0.3;font-size:0.5rem;">${created}</span>
+                        </div>
+                        <div class="file-actions">
+                            <button class="btn-sm orange" onclick="window.restoreBackup('${b.name}')">🔄 Restore</button>
+                        </div>
+                    </div>
+                `;
+            });
+            container.innerHTML = html;
+        } catch(e) {
+            showToast('❌ ' + e.message, true);
+        }
+    }
+
+    window.restoreBackup = async function(backupName) {
+        showCustomModal('🔄 Restore Backup', 
+            '<p style="opacity:0.6;text-align:center;font-size:0.8rem;">This will restore from backup <strong>' + escapeHtml(backupName) + '</strong>.<br>All current data will be overwritten.<br>Are you sure?</p>',
+            'YES, RESTORE', async function() {
+                try {
+                    showToast('🔄 Restoring...', false);
+                    await apiCall(`/api/backup/restore/${backupName}`, 'POST');
+                    showToast('✅ Restored successfully', false);
+                    closeModal();
+                    fetchFiles();
+                    fetchAllFiles();
+                    fetchProcesses();
+                    fetchStorage();
+                } catch(e) {
+                    showToast('❌ ' + e.message, true);
+                }
+            });
+    };
+
+    async function cleanupStorage() {
+        showCustomModal('🧹 Cleanup Storage', 
+            '<p style="opacity:0.6;text-align:center;font-size:0.8rem;">This will remove old files (keeping latest 5 per user).<br>Running files and bot token files are preserved.<br>A backup will be created before cleanup.<br>Are you sure?</p>',
+            'YES, CLEANUP', async function() {
+                try {
+                    showToast('🧹 Cleaning up...', false);
+                    const response = await fetch('/api/storage/cleanup', {
+                        method: 'POST',
+                        headers: { 'X-Username': currentUser }
+                    });
+                    const data = await response.json();
+                    if (response.ok) {
+                        showToast('✅ Cleanup completed', false);
+                        closeModal();
+                        fetchStorage();
+                        fetchFiles();
+                        fetchAllFiles();
+                    } else {
+                        throw new Error(data.error || 'Cleanup failed');
+                    }
+                } catch(e) {
+                    showToast('❌ ' + e.message, true);
+                }
+            });
     }
 
     // ============================================================
@@ -3980,9 +4331,18 @@ HTML_TEMPLATE = '''
 
     document.getElementById('createAccountBtn').addEventListener('click', function() {
         showCustomModal('➕ Create Account',
-            '<div style="margin-bottom:12px;"><input type="text" id="signupUser" placeholder="Username" style="font-size:0.7rem;width:100%;background:rgba(0,0,0,0.6);border:1.5px solid rgba(0,255,136,0.15);color:#00ff88;padding:10px 12px;border-radius:8px;font-family:\'Orbitron\',\'Courier New\',monospace;"></div>' +
-            '<div style="margin-bottom:12px;"><input type="password" id="signupPass" placeholder="Password" style="font-size:0.7rem;width:100%;background:rgba(0,0,0,0.6);border:1.5px solid rgba(0,255,136,0.15);color:#00ff88;padding:10px 12px;border-radius:8px;font-family:\'Orbitron\',\'Courier New\',monospace;"></div>' +
-            '<div><input type="password" id="signupPassConfirm" placeholder="Confirm Password" style="font-size:0.7rem;width:100%;background:rgba(0,0,0,0.6);border:1.5px solid rgba(0,255,136,0.15);color:#00ff88;padding:10px 12px;border-radius:8px;font-family:\'Orbitron\',\'Courier New\',monospace;"></div>',
+            '<div style="margin-bottom:12px;">' +
+            '<label style="font-size:0.6rem;opacity:0.4;display:block;margin-bottom:4px;">👤 Username</label>' +
+            '<input type="text" id="signupUser" placeholder="Choose a username" style="font-size:0.7rem;">' +
+            '</div>' +
+            '<div style="margin-bottom:12px;">' +
+            '<label style="font-size:0.6rem;opacity:0.4;display:block;margin-bottom:4px;">🔒 Password</label>' +
+            '<input type="password" id="signupPass" placeholder="Choose a password" style="font-size:0.7rem;">' +
+            '</div>' +
+            '<div>' +
+            '<label style="font-size:0.6rem;opacity:0.4;display:block;margin-bottom:4px;">🔒 Confirm Password</label>' +
+            '<input type="password" id="signupPassConfirm" placeholder="Confirm password" style="font-size:0.7rem;">' +
+            '</div>',
             'CREATE ACCOUNT', async function() {
                 const user = document.getElementById('signupUser').value.trim();
                 const pass = document.getElementById('signupPass').value.trim();
@@ -3999,7 +4359,7 @@ HTML_TEMPLATE = '''
                     closeModal();
                     document.getElementById('user').value = user;
                     document.getElementById('pass').value = pass;
-                    showToast('✅ Account created! Login to continue.');
+                    showToast('✅ Account created! Login to continue.', false);
                 }
             });
     });
@@ -4044,9 +4404,9 @@ HTML_TEMPLATE = '''
     document.getElementById('menuAddUser').addEventListener('click', function() {
         document.getElementById('profileDropdown').classList.remove('open');
         showCustomModal('➕ Add User',
-            '<div style="margin-bottom:10px;"><input type="text" id="addUsername" placeholder="Username" style="font-size:0.7rem;width:100%;background:rgba(0,0,0,0.6);border:1.5px solid rgba(0,255,136,0.15);color:#00ff88;padding:10px 12px;border-radius:8px;font-family:\'Orbitron\',\'Courier New\',monospace;"></div>' +
-            '<div><input type="password" id="addPassword" placeholder="Password" style="font-size:0.7rem;width:100%;background:rgba(0,0,0,0.6);border:1.5px solid rgba(0,255,136,0.15);color:#00ff88;padding:10px 12px;border-radius:8px;font-family:\'Orbitron\',\'Courier New\',monospace;"></div>' +
-            '<div style="margin-top:10px;"><select id="addUserRole" style="font-size:0.6rem;width:100%;background:rgba(0,0,0,0.6);border:1.5px solid rgba(0,255,136,0.15);color:#00ff88;padding:10px 12px;border-radius:8px;font-family:\'Orbitron\',\'Courier New\',monospace;">' +
+            '<div style="margin-bottom:10px;"><input type="text" id="addUsername" placeholder="Username" style="font-size:0.7rem;"></div>' +
+            '<div><input type="password" id="addPassword" placeholder="Password" style="font-size:0.7rem;"></div>' +
+            '<div style="margin-top:10px;"><select id="addUserRole" style="font-size:0.6rem;">' +
             '<option value="user">User</option>' +
             '<option value="admin">Admin</option>' +
             '</select></div>',
@@ -4060,7 +4420,7 @@ HTML_TEMPLATE = '''
                 }
                 try {
                     await apiCall('/api/users/add', 'POST', { username, password, role });
-                    showToast('✅ User added');
+                    showToast('✅ User added', false, username);
                     closeModal();
                     fetchUsers();
                 } catch(e) {
@@ -4084,7 +4444,8 @@ HTML_TEMPLATE = '''
     document.getElementById('menuAddAdmin').addEventListener('click', function() {
         document.getElementById('profileDropdown').classList.remove('open');
         showCustomModal('➕ Add Admin',
-            '<div style="margin-bottom:10px;"><input type="text" id="addAdminUsername" placeholder="Existing Username" style="font-size:0.7rem;width:100%;background:rgba(0,0,0,0.6);border:1.5px solid rgba(0,255,136,0.15);color:#00ff88;padding:10px 12px;border-radius:8px;font-family:\'Orbitron\',\'Courier New\',monospace;"></div>',
+            '<div style="margin-bottom:10px;"><input type="text" id="addAdminUsername" placeholder="Existing Username" style="font-size:0.7rem;"></div>' +
+            '<p style="font-size:0.5rem;opacity:0.3;">User must already exist. If user exists, they will be promoted to admin.</p>',
             'PROMOTE TO ADMIN', async function() {
                 const username = document.getElementById('addAdminUsername').value.trim();
                 if (!username) {
@@ -4093,7 +4454,7 @@ HTML_TEMPLATE = '''
                 }
                 try {
                     await apiCall('/api/users/promote', 'POST', { username, role: 'admin' });
-                    showToast('✅ User promoted to admin');
+                    showToast('✅ User promoted to admin', false, username);
                     closeModal();
                     fetchUsers();
                 } catch(e) {
@@ -4108,14 +4469,26 @@ HTML_TEMPLATE = '''
     });
 
     document.getElementById('menuSettings').addEventListener('click', function() {
-        showToast('⚙ Settings - Use Telegram bot');
+        openSettings();
+    });
+
+    document.getElementById('menuBackup').addEventListener('click', function() {
+        showPage('backup');
         document.getElementById('profileDropdown').classList.remove('open');
+        loadBackups();
+    });
+
+    document.getElementById('menuStorage').addEventListener('click', function() {
+        showPage('storage');
+        document.getElementById('profileDropdown').classList.remove('open');
+        fetchStorage();
+        loadStorageDetails();
     });
 
     document.getElementById('menuChangeUsername').addEventListener('click', function() {
         document.getElementById('profileDropdown').classList.remove('open');
         showCustomModal('✏️ Change Username',
-            '<div><input type="text" id="newUsername" placeholder="New Username" style="font-size:0.7rem;width:100%;background:rgba(0,0,0,0.6);border:1.5px solid rgba(0,255,136,0.15);color:#00ff88;padding:10px 12px;border-radius:8px;font-family:\'Orbitron\',\'Courier New\',monospace;"></div>',
+            '<div><input type="text" id="newUsername" placeholder="New Username" style="font-size:0.7rem;"></div>',
             'UPDATE', async function() {
                 const newUsername = document.getElementById('newUsername').value.trim();
                 if (!newUsername) {
@@ -4124,12 +4497,14 @@ HTML_TEMPLATE = '''
                 }
                 try {
                     await apiCall('/api/users/update', 'PUT', { field: 'username', value: newUsername });
-                    showToast('✅ Username updated');
+                    showToast('✅ Username updated', false, newUsername);
                     closeModal();
                     currentUser = newUsername;
                     localStorage.setItem('loggedInUser', JSON.stringify({ username: currentUser, role: currentRole }));
+                    localStorage.setItem('lastActivity_' + currentUser, Date.now().toString());
                     document.getElementById('profileIcon').textContent = currentUser.charAt(0).toUpperCase();
                     document.getElementById('dropdownUsername').textContent = '👤 ' + currentUser;
+                    fetchUsers();
                 } catch(e) {
                     showToast('❌ ' + e.message, true);
                 }
@@ -4139,8 +4514,8 @@ HTML_TEMPLATE = '''
     document.getElementById('menuChangePassword').addEventListener('click', function() {
         document.getElementById('profileDropdown').classList.remove('open');
         showCustomModal('🔑 Change Password',
-            '<div style="margin-bottom:10px;"><input type="password" id="oldPassword" placeholder="Old Password" style="font-size:0.7rem;width:100%;background:rgba(0,0,0,0.6);border:1.5px solid rgba(0,255,136,0.15);color:#00ff88;padding:10px 12px;border-radius:8px;font-family:\'Orbitron\',\'Courier New\',monospace;"></div>' +
-            '<div><input type="password" id="newPassword" placeholder="New Password" style="font-size:0.7rem;width:100%;background:rgba(0,0,0,0.6);border:1.5px solid rgba(0,255,136,0.15);color:#00ff88;padding:10px 12px;border-radius:8px;font-family:\'Orbitron\',\'Courier New\',monospace;"></div>',
+            '<div style="margin-bottom:10px;"><input type="password" id="oldPassword" placeholder="Old Password" style="font-size:0.7rem;"></div>' +
+            '<div><input type="password" id="newPassword" placeholder="New Password" style="font-size:0.7rem;"></div>',
             'UPDATE', async function() {
                 const oldPass = document.getElementById('oldPassword').value.trim();
                 const newPass = document.getElementById('newPassword').value.trim();
@@ -4150,7 +4525,7 @@ HTML_TEMPLATE = '''
                 }
                 try {
                     await apiCall('/api/users/update', 'PUT', { field: 'password', old_value: oldPass, value: newPass });
-                    showToast('✅ Password updated');
+                    showToast('✅ Password updated', false);
                     closeModal();
                 } catch(e) {
                     showToast('❌ ' + e.message, true);
@@ -4161,6 +4536,7 @@ HTML_TEMPLATE = '''
     document.getElementById('menuDownloadAll').addEventListener('click', async function() {
         document.getElementById('profileDropdown').classList.remove('open');
         try {
+            showToast('📦 Preparing download...', false);
             const response = await fetch('/api/files/download-all', {
                 headers: { 'X-Username': currentUser }
             });
@@ -4169,20 +4545,27 @@ HTML_TEMPLATE = '''
                 throw new Error(err.error || 'Download failed');
             }
             const blob = await response.blob();
+            const contentDisposition = response.headers.get('Content-Disposition');
+            let filename = 'all_files.zip';
+            if (contentDisposition) {
+                const match = contentDisposition.match(/filename="(.+)"/);
+                if (match) filename = match[1];
+            }
             const url = window.URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = 'all_files.zip';
+            a.download = filename;
             document.body.appendChild(a);
             a.click();
             a.remove();
             window.URL.revokeObjectURL(url);
-            showToast('✅ Download started');
+            showToast('✅ Download started', false);
         } catch(e) {
             showToast('❌ ' + e.message, true);
         }
     });
 
+    // Back buttons
     document.getElementById('backFromUsers').addEventListener('click', () => showPage('dashboard'));
     document.getElementById('backFromAdmins').addEventListener('click', () => showPage('dashboard'));
     document.getElementById('backFromAllFiles').addEventListener('click', () => showPage('dashboard'));
@@ -4192,14 +4575,37 @@ HTML_TEMPLATE = '''
         showPage('dashboard');
     });
     document.getElementById('backFromFolderManager').addEventListener('click', () => showPage('dashboard'));
+    document.getElementById('backFromBackup').addEventListener('click', () => showPage('dashboard'));
+    document.getElementById('backFromStorage').addEventListener('click', () => showPage('dashboard'));
 
+    // Terminal buttons
     document.getElementById('terminalStartBtn').addEventListener('click', startTerminal);
     document.getElementById('terminalStopBtn').addEventListener('click', stopTerminal);
+    document.getElementById('terminalClearBtn').addEventListener('click', clearTerminal);
     document.getElementById('terminalSendBtn').addEventListener('click', sendCommand);
     document.getElementById('terminalInput').addEventListener('keypress', function(e) {
         if (e.key === 'Enter') sendCommand();
     });
+    document.getElementById('terminalInput').addEventListener('keydown', function(e) {
+        if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            if (terminalCommandHistory.length > 0) {
+                terminalHistoryIndex = Math.min(terminalHistoryIndex + 1, terminalCommandHistory.length - 1);
+                this.value = terminalCommandHistory[terminalCommandHistory.length - 1 - terminalHistoryIndex] || '';
+            }
+        } else if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            if (terminalHistoryIndex > 0) {
+                terminalHistoryIndex--;
+                this.value = terminalCommandHistory[terminalCommandHistory.length - 1 - terminalHistoryIndex] || '';
+            } else {
+                terminalHistoryIndex = -1;
+                this.value = '';
+            }
+        }
+    });
 
+    // Upload button
     document.getElementById('uploadBtn').addEventListener('click', async function() {
         const input = document.getElementById('fileInput');
         if (input.files.length === 0) { showToast('Select files first', true); return; }
@@ -4210,46 +4616,73 @@ HTML_TEMPLATE = '''
         }
         
         try {
+            document.getElementById('uploadStatus').textContent = '⏳ Uploading...';
             const data = await apiUpload('/api/upload', formData);
-            showToast('📤 Uploaded ' + data.files_uploaded + ' files');
+            showToast('📤 Uploaded ' + data.files_uploaded + ' files', false);
+            document.getElementById('uploadStatus').textContent = '✅ Uploaded: ' + data.files_uploaded + ' files';
             input.value = '';
-            document.getElementById('fileLabel').innerHTML = '📎 Select Files <span class="file-count" id="fileCountBadge" style="background:rgba(0,255,136,0.1);border-radius:12px;padding:0 10px;font-size:0.5rem;border:1px solid rgba(0,255,136,0.15);">0 selected</span>';
-            fetchFiles();
-            if (currentRole === 'owner') fetchAllFiles();
-            fetchProcesses();
+            fileLabel.innerHTML = '📎 Select Files <span class="file-count" id="fileCountBadge">0 selected</span>';
+            document.getElementById('fileCountBadge') && (document.getElementById('fileCountBadge').textContent = '0 selected');
+            await fetchFiles();
+            await fetchAllFiles();
+            await fetchProcesses();
+            await fetchStorage();
             loadFolder(currentFolderPath);
-            fetchStorageStats();
         } catch(e) {
+            document.getElementById('uploadStatus').textContent = '❌ ' + e.message;
             showToast('Upload failed', true);
         }
     });
 
+    // Deploy button
     document.getElementById('deployBtn').addEventListener('click', async function() {
         const code = document.getElementById('pyCodeArea').value.trim();
         const filename = document.getElementById('pyFilename').value.trim() || 'main.py';
         if (!code) { showToast('Enter code', true); return; }
         try {
-            await apiCall('/api/deploy', 'POST', { filename, code });
-            showToast('✅ Deployed');
+            document.getElementById('deployStatus').textContent = '⏳ Deploying...';
+            const data = await apiCall('/api/deploy', 'POST', { filename, code });
+            showToast('✅ Deployed', false, filename);
+            document.getElementById('deployStatus').textContent = '✅ Deployed: ' + filename;
             document.getElementById('pyCodeArea').value = '';
-            fetchFiles();
-            if (currentRole === 'owner') fetchAllFiles();
-            fetchProcesses();
-            fetchStorageStats();
+            await fetchFiles();
+            await fetchAllFiles();
+            await fetchProcesses();
+            await fetchStorage();
         } catch(e) {
+            document.getElementById('deployStatus').textContent = '❌ ' + e.message;
             showToast('Deploy failed', true);
         }
     });
 
-    document.getElementById('refreshBtn').addEventListener('click', function() {
-        fetchFiles();
-        if (currentRole === 'owner') fetchAllFiles();
-        fetchProcesses();
-        fetchUsers();
-        fetchStorageStats();
-        showToast('🔄 Refreshed');
+    // Start/Stop All
+    document.getElementById('startAllBtn').addEventListener('click', async function() {
+        try {
+            showToast('▶ Starting all...', false);
+            await apiCall('/api/files/start-all', 'POST');
+            showToast('✅ All started', false);
+            await fetchFiles();
+            await fetchAllFiles();
+            await fetchProcesses();
+        } catch(e) {
+            showToast('❌ ' + e.message, true);
+        }
     });
 
+    document.getElementById('stopAllBtn').addEventListener('click', async function() {
+        try {
+            showToast('■ Stopping all...', false);
+            await apiCall('/api/files/stop-all', 'POST');
+            showToast('✅ All stopped', false);
+            await fetchFiles();
+            await fetchAllFiles();
+            await fetchProcesses();
+        } catch(e) {
+            showToast('❌ ' + e.message, true);
+        }
+    });
+
+    // Logs
     document.getElementById('logsBtn').addEventListener('click', async function() {
         try {
             const data = await apiCall('/api/logs', 'GET');
@@ -4262,6 +4695,17 @@ HTML_TEMPLATE = '''
         }
     });
 
+    // Refresh
+    document.getElementById('refreshBtn').addEventListener('click', function() {
+        fetchFiles();
+        fetchAllFiles();
+        fetchProcesses();
+        fetchUsers();
+        fetchStorage();
+        showToast('🔄 Refreshed', false);
+    });
+
+    // File Manager
     document.getElementById('fileManagerBtn').addEventListener('click', function() {
         showPage('folderManager');
         loadFolder('');
@@ -4271,23 +4715,89 @@ HTML_TEMPLATE = '''
     document.getElementById('folderCreateFile').addEventListener('click', createFile);
     document.getElementById('folderRefresh').addEventListener('click', function() {
         loadFolder(currentFolderPath);
-        showToast('🔄 Refreshed');
+        showToast('🔄 Refreshed', false);
     });
 
     document.getElementById('folderSearch').addEventListener('input', function() {
         renderFolderContents();
     });
 
+    // Backup
+    document.getElementById('createBackupBtn').addEventListener('click', createBackup);
+    document.getElementById('refreshBackupsBtn').addEventListener('click', loadBackups);
+
+    // Storage
+    document.getElementById('cleanupStorageBtn').addEventListener('click', cleanupStorage);
+    document.getElementById('refreshStorageBtn').addEventListener('click', function() {
+        fetchStorage();
+        loadStorageDetails();
+        showToast('🔄 Refreshed', false);
+    });
+
+    // File input
     fileInput.addEventListener('change', function() {
         const count = this.files.length;
-        document.getElementById('fileCountBadge').textContent = count + ' selected';
+        if (count === 0) {
+            fileCountBadge.textContent = '0 selected';
+            fileLabel.innerHTML = '📎 Select Files <span class="file-count" id="fileCountBadge">0 selected</span>';
+        } else {
+            const names = Array.from(this.files).map(f => f.name).join(', ');
+            fileLabel.innerHTML = '📎 ' + names + ' <span class="file-count" id="fileCountBadge">' + count + ' files</span>';
+        }
+        document.getElementById('fileCountBadge') && (document.getElementById('fileCountBadge').textContent = count + ' files');
     });
+
+    // ============================================================
+    // STORAGE DETAILS
+    // ============================================================
+
+    async function loadStorageDetails() {
+        try {
+            const data = await apiCall('/api/storage');
+            storageInfo = data.storage || {};
+            
+            const used = storageInfo.used_mb || 0;
+            const max = storageInfo.max_mb || 480;
+            const percent = storageInfo.percent || 0;
+            const files = storageInfo.files || 0;
+            
+            const warning = percent > 80 ? '⚠️' : '✅';
+            const status = percent > 80 ? 'Warning: Storage almost full!' : 'Healthy';
+            
+            document.getElementById('storageDetails').innerHTML = `
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;font-size:0.65rem;">
+                    <div><span style="opacity:0.4;">Used:</span> ${used.toFixed(1)} MB</div>
+                    <div><span style="opacity:0.4;">Total:</span> ${max.toFixed(1)} MB</div>
+                    <div><span style="opacity:0.4;">Used %:</span> ${percent.toFixed(1)}%</div>
+                    <div><span style="opacity:0.4;">Files:</span> ${files}</div>
+                    <div style="grid-column:span 2;"><span style="opacity:0.4;">Status:</span> ${warning} ${status}</div>
+                </div>
+                <div class="storage-bar" style="margin-top:10px;">
+                    <div class="fill ${percent > 80 ? 'warning' : ''}" style="width:${Math.min(percent, 100)}%;"></div>
+                </div>
+                <div style="font-size:0.5rem;opacity:0.3;margin-top:6px;">
+                    Auto-cleanup triggers at 90% usage. Keeps latest 5 files per user.
+                </div>
+            `;
+        } catch(e) {
+            console.error('Error loading storage details:', e);
+            document.getElementById('storageDetails').innerHTML = '<div style="opacity:0.3;text-align:center;padding:10px;font-size:0.7rem;">Error loading storage info</div>';
+        }
+    }
 
     // ============================================================
     // INIT
     // ============================================================
 
     function init() {
+        loader.style.display = 'flex';
+        let progress = 0;
+        const interval = setInterval(() => {
+            progress += 5;
+            updateLoader(progress);
+            if (progress >= 100) { clearInterval(interval); hideLoader(); }
+        }, 150);
+
         const savedUser = localStorage.getItem('loggedInUser');
         if (savedUser) {
             try { 
@@ -4301,13 +4811,16 @@ HTML_TEMPLATE = '''
             } catch(e) {}
         }
 
-        if (isLoggedIn && currentUser) initDashboard();
-        else { 
-            loginBox.style.display = 'block'; 
-            dashboardPage.style.display = 'none';
-        }
-        
-        if (loader) loader.style.display = 'none';
+        setTimeout(() => {
+            hideLoader();
+            if (isLoggedIn && currentUser) initDashboard();
+            else { 
+                loginBox.style.display = 'block'; 
+                dashboardPage.style.display = 'none';
+                document.getElementById('user').value = '';
+                document.getElementById('pass').value = '';
+            }
+        }, 2000);
     }
 
     window.addEventListener('load', init);
@@ -4317,6 +4830,1527 @@ HTML_TEMPLATE = '''
 </body>
 </html>
 '''
+
+# ============================================================
+# TELEGRAM BOT HANDLERS - FULL VERSION
+# ============================================================
+
+# Store user states for multi-step operations with timers
+user_states = {}
+user_timers = {}
+owner_session = {}
+
+def get_main_keyboard():
+    keyboard = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
+    keyboard.add(
+        types.KeyboardButton("📂 My Files"),
+        types.KeyboardButton("🤖 Bot List")
+    )
+    keyboard.add(
+        types.KeyboardButton("👥 User List"),
+        types.KeyboardButton("👑 Admin Panel")
+    )
+    keyboard.add(
+        types.KeyboardButton("🔔 Notifications"),
+        types.KeyboardButton("⚙ Settings")
+    )
+    keyboard.add(
+        types.KeyboardButton("➕ Add User"),
+        types.KeyboardButton("👤 Owner Info")
+    )
+    keyboard.add(
+        types.KeyboardButton("✏️ Edit Contact Owner")
+    )
+    return keyboard
+
+def get_owner_keyboard():
+    keyboard = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
+    keyboard.add(
+        types.KeyboardButton("📂 My Files"),
+        types.KeyboardButton("🤖 Bot List")
+    )
+    keyboard.add(
+        types.KeyboardButton("👥 User List"),
+        types.KeyboardButton("👑 Admin Panel")
+    )
+    keyboard.add(
+        types.KeyboardButton("🔔 Notifications"),
+        types.KeyboardButton("⚙ Settings")
+    )
+    keyboard.add(
+        types.KeyboardButton("➕ Add User"),
+        types.KeyboardButton("👤 Owner Info")
+    )
+    keyboard.add(
+        types.KeyboardButton("✏️ Edit Contact Owner")
+    )
+    keyboard.add(
+        types.KeyboardButton("🔑 Change Owner Password"),
+        types.KeyboardButton("✏️ Change Owner Username")
+    )
+    keyboard.add(
+        types.KeyboardButton("📦 Backup"),
+        types.KeyboardButton("💾 Storage")
+    )
+    return keyboard
+
+def clear_user_state(user_id):
+    if user_id in user_timers:
+        try:
+            user_timers[user_id].cancel()
+        except:
+            pass
+        del user_timers[user_id]
+    if user_id in user_states:
+        del user_states[user_id]
+    if user_id in owner_session:
+        del owner_session[user_id]
+
+def set_user_state(user_id, state_data):
+    clear_user_state(user_id)
+    user_states[user_id] = state_data
+    timer = threading.Timer(60.0, lambda: clear_user_state(user_id))
+    timer.daemon = True
+    user_timers[user_id] = timer
+    timer.start()
+
+def is_owner_authenticated(user_id):
+    return user_id in owner_session and owner_session[user_id].get('authenticated', False)
+
+# ============================================================
+# BOT HANDLERS
+# ============================================================
+
+@bot.message_handler(commands=['start', 'help'])
+def start_message(message):
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    
+    clear_user_state(user_id)
+    
+    users = load_users()
+    
+    if user_id == OWNER_ID:
+        owner_session[user_id] = {'authenticated': True}
+        bot.reply_to(
+            message, 
+            f"🤖 **Hosting Bot Control Panel**\n\n👤 Owner\n🤖 Bot: {BOT_USERNAME}\n\nSelect an option from the keyboard below:",
+            reply_markup=get_owner_keyboard(),
+            parse_mode='Markdown'
+        )
+        return
+    
+    if is_owner_authenticated(user_id):
+        bot.reply_to(
+            message, 
+            f"🤖 **Hosting Bot Control Panel**\n\n👤 Owner\n🤖 Bot: {BOT_USERNAME}\n\nSelect an option from the keyboard below:",
+            reply_markup=get_owner_keyboard(),
+            parse_mode='Markdown'
+        )
+        return
+    
+    user_exists = False
+    username = None
+    
+    for uname, info in users.items():
+        if str(user_id) == info.get('telegram_id', ''):
+            user_exists = True
+            username = uname
+            break
+    
+    if not user_exists:
+        for uname, info in users.items():
+            if str(user_id) == uname:
+                user_exists = True
+                username = uname
+                break
+    
+    if not user_exists:
+        bot.reply_to(message, "⚠️ You are not registered. Contact owner.", reply_markup=types.ReplyKeyboardRemove())
+        return
+    
+    users_changed = False
+    if users.get(username, {}).get('telegram_id') != str(user_id):
+        users[username]['telegram_id'] = str(user_id)
+        users_changed = True
+    
+    if users_changed:
+        save_users(users)
+    
+    role = users.get(username, {}).get('role', 'user')
+    
+    if role == 'owner':
+        owner_session[user_id] = {'authenticated': True}
+        bot.reply_to(
+            message, 
+            f"🤖 **Hosting Bot Control Panel**\n\n👤 Owner\n🤖 Bot: {BOT_USERNAME}\n\nSelect an option from the keyboard below:",
+            reply_markup=get_owner_keyboard(),
+            parse_mode='Markdown'
+        )
+    else:
+        bot.reply_to(
+            message, 
+            f"🤖 **Hosting Bot Control Panel**\n\n👤 User: `{username}`\n🤖 Bot: {BOT_USERNAME}\n\nSelect an option from the keyboard below:",
+            reply_markup=get_main_keyboard(),
+            parse_mode='Markdown'
+        )
+
+@bot.message_handler(commands=['owner'])
+def owner_command(message):
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    
+    if is_owner_authenticated(user_id):
+        bot.reply_to(message, "✅ You are already authenticated as Owner!", reply_markup=get_owner_keyboard())
+        return
+    
+    users = load_users()
+    is_owner_user = False
+    for uname, info in users.items():
+        if info.get('role') == 'owner' and str(user_id) == info.get('telegram_id', ''):
+            is_owner_user = True
+            break
+    
+    if is_owner_user or user_id == OWNER_ID:
+        owner_session[user_id] = {'authenticated': True}
+        bot.reply_to(message, "✅ Owner access granted!", reply_markup=get_owner_keyboard())
+        return
+    
+    msg = bot.reply_to(message, "🔑 **Enter Owner Password:**", parse_mode='Markdown', reply_markup=types.ReplyKeyboardRemove())
+    set_user_state(user_id, {'state': 'owner_password', 'message_id': msg.message_id})
+
+def process_owner_password(message):
+    user_id = message.from_user.id
+    password = message.text.strip()
+    
+    if password == OWNER_PASSWORD:
+        owner_session[user_id] = {'authenticated': True}
+        bot.reply_to(message, "✅ Owner access granted! You now have full access.", reply_markup=get_owner_keyboard())
+        clear_user_state(user_id)
+    else:
+        bot.reply_to(message, "❌ Wrong password! Use /owner to try again.", reply_markup=get_main_keyboard())
+        clear_user_state(user_id)
+
+@bot.message_handler(func=lambda message: True)
+def handle_text_messages(message):
+    user_id = message.from_user.id
+    text = message.text
+    
+    if user_id in user_states:
+        state = user_states[user_id].get('state')
+        if state == 'add_user_username':
+            process_add_user_username(message)
+            return
+        elif state == 'add_user_password':
+            process_add_user_password(message)
+            return
+        elif state == 'edit_contact_owner':
+            process_edit_contact_owner(message)
+            return
+        elif state == 'add_admin':
+            process_add_admin(message)
+            return
+        elif state == 'change_owner_username':
+            process_change_owner_username(message)
+            return
+        elif state == 'change_owner_password':
+            process_change_owner_password(message)
+            return
+        elif state == 'owner_password':
+            process_owner_password(message)
+            return
+    
+    clear_user_state(user_id)
+    
+    users = load_users()
+    
+    is_owner = is_owner_authenticated(user_id)
+    
+    if user_id == OWNER_ID:
+        is_owner = True
+    
+    if not is_owner:
+        user_exists = False
+        for username, info in users.items():
+            if str(user_id) == info.get('telegram_id', ''):
+                user_exists = True
+                break
+        
+        if not user_exists:
+            bot.reply_to(message, "⚠️ You are not registered. Contact owner.", reply_markup=types.ReplyKeyboardRemove())
+            return
+    
+    if text == "📂 My Files":
+        my_files_handler(message)
+    elif text == "🤖 Bot List":
+        bot_list_handler(message)
+    elif text == "👥 User List":
+        user_list_handler(message)
+    elif text == "👑 Admin Panel":
+        admin_panel_handler(message)
+    elif text == "🔔 Notifications":
+        notifications_handler(message)
+    elif text == "⚙ Settings":
+        settings_handler(message)
+    elif text == "➕ Add User":
+        add_user_handler(message)
+    elif text == "👤 Owner Info":
+        owner_info_handler(message)
+    elif text == "✏️ Edit Contact Owner":
+        edit_contact_owner_handler(message)
+    elif text == "🔑 Change Owner Password" and is_owner:
+        change_owner_password_handler(message)
+    elif text == "✏️ Change Owner Username" and is_owner:
+        change_owner_username_handler(message)
+    elif text == "📦 Backup" and is_owner:
+        backup_handler(message)
+    elif text == "💾 Storage" and is_owner:
+        storage_handler(message)
+    else:
+        bot.reply_to(message, "❌ Unknown command. Use /start to see menu.", reply_markup=get_main_keyboard())
+
+# ============================================================
+# HANDLER FUNCTIONS
+# ============================================================
+
+def my_files_handler(message):
+    user_id = message.from_user.id
+    users = load_users()
+    
+    if user_id == OWNER_ID or is_owner_authenticated(user_id):
+        username = "riyaj"
+    else:
+        username = None
+        for uname, info in users.items():
+            if str(user_id) == info.get('telegram_id', ''):
+                username = uname
+                break
+        
+        if not username:
+            for uname, info in users.items():
+                if str(user_id) == uname:
+                    username = uname
+                    break
+    
+    if not username:
+        bot.reply_to(message, "⚠️ You are not registered. Contact owner.", reply_markup=get_main_keyboard())
+        return
+    
+    user_files = get_user_files(username)
+    
+    if not user_files:
+        bot.reply_to(message, f"📂 **No files found for `{username}`**\n\nUpload files from website first.", parse_mode='Markdown', reply_markup=get_main_keyboard())
+        return
+    
+    response = f"📂 **Files for `{username}`:**\n\n"
+    for f in user_files:
+        status_icon = "🟢" if f['status'] == 'running' else "🔴"
+        bot_name = f" @{f['bot_username']}" if f.get('bot_username') else ""
+        response += f"{status_icon} `{f['filename']}` ({f['size']//1024} KB){bot_name}\n"
+    
+    bot.reply_to(message, response, parse_mode='Markdown', reply_markup=get_main_keyboard())
+
+def bot_list_handler(message):
+    all_files = get_all_files()
+    
+    bots = {}
+    for f in all_files:
+        if f.get('bot_username'):
+            if f['bot_username'] not in bots:
+                bots[f['bot_username']] = []
+            bots[f['bot_username']].append(f)
+    
+    if not bots:
+        bot.reply_to(message, "🤖 **No bots found**\n\nUpload files with bot tokens first.", parse_mode='Markdown', reply_markup=get_main_keyboard())
+        return
+    
+    response = "🤖 **All Bots:**\n\n"
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    
+    for bot_username, files in bots.items():
+        response += f"🤖 @{bot_username} ({len(files)} files)\n"
+        for f in files:
+            status_icon = "🟢" if f['status'] == 'running' else "🔴"
+            response += f"  {status_icon} `{f['filename']}` (👤{f['owner']})\n"
+            markup.add(types.InlineKeyboardButton(
+                f"{status_icon} {f['filename'][:25]}", 
+                callback_data=f'viewfile_{f["id"]}_{f["owner"]}'
+            ))
+    
+    markup.add(types.InlineKeyboardButton("🔙 Back", callback_data='back_to_start'))
+    bot.reply_to(message, response, parse_mode='Markdown', reply_markup=markup)
+
+def user_list_handler(message):
+    user_id = message.from_user.id
+    users = load_users()
+    
+    if user_id == OWNER_ID or is_owner_authenticated(user_id):
+        user_list = users
+    else:
+        user_list = {u: info for u, info in users.items() if info.get('role') != 'owner'}
+    
+    if not user_list:
+        bot.reply_to(message, "👥 **No users found**", parse_mode='Markdown', reply_markup=get_main_keyboard())
+        return
+    
+    response = "👥 **User List:**\n\n"
+    for username, info in user_list.items():
+        role = info.get('role', 'user')
+        if role == 'owner':
+            response += f"👑 `{username}` (Owner)\n"
+        else:
+            response += f"👤 `{username}` (🔑 `{info['password']}`)\n"
+    
+    bot.reply_to(message, response, parse_mode='Markdown', reply_markup=get_main_keyboard())
+
+def admin_panel_handler(message):
+    user_id = message.from_user.id
+    users = load_users()
+    
+    if user_id == OWNER_ID or is_owner_authenticated(user_id):
+        role = 'owner'
+        username = 'riyaj'
+    else:
+        username = None
+        for uname, info in users.items():
+            if str(user_id) == info.get('telegram_id', ''):
+                username = uname
+                break
+        
+        if not username:
+            for uname, info in users.items():
+                if str(user_id) == uname:
+                    username = uname
+                    break
+        
+        if not username:
+            bot.reply_to(message, "⚠️ You are not registered. Contact owner.", reply_markup=get_main_keyboard())
+            return
+        
+        role = users.get(username, {}).get('role', 'user')
+    
+    if role not in ['admin', 'owner']:
+        bot.reply_to(message, "⚠️ Admin only", reply_markup=get_main_keyboard())
+        return
+    
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("👥 User List", callback_data='admin_userlist'),
+        types.InlineKeyboardButton("➕ Add User", callback_data='admin_adduser')
+    )
+    markup.add(
+        types.InlineKeyboardButton("👑 Admins List", callback_data='admin_adminslist'),
+        types.InlineKeyboardButton("➕ Add Admin", callback_data='admin_addadmin')
+    )
+    if role == 'owner':
+        markup.add(
+            types.InlineKeyboardButton("👤 Owner Info", callback_data='admin_ownerinfo')
+        )
+        markup.add(
+            types.InlineKeyboardButton("🔑 Change Owner Password", callback_data='admin_change_owner_password')
+        )
+        markup.add(
+            types.InlineKeyboardButton("✏️ Change Owner Username", callback_data='admin_change_owner_username')
+        )
+        markup.add(
+            types.InlineKeyboardButton("📦 Backup", callback_data='admin_backup')
+        )
+        markup.add(
+            types.InlineKeyboardButton("💾 Storage", callback_data='admin_storage')
+        )
+    markup.add(types.InlineKeyboardButton("🔙 Back", callback_data='back_to_start'))
+    
+    response = "👑 **Admin Panel**\n\nSelect an option below:"
+    
+    bot.reply_to(message, response, parse_mode='Markdown', reply_markup=markup)
+
+def notifications_handler(message):
+    settings = load_settings()
+    current = settings.get('notifications_enabled', True)
+    
+    status = "🟢 ON" if current else "🔴 OFF"
+    response = f"🔔 **Notifications**\n\nCurrent Status: {status}"
+    
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("🔔 Turn ON", callback_data='notif_on'),
+        types.InlineKeyboardButton("🔕 Turn OFF", callback_data='notif_off')
+    )
+    markup.add(types.InlineKeyboardButton("🔙 Back", callback_data='back_to_start'))
+    
+    bot.reply_to(message, response, parse_mode='Markdown', reply_markup=markup)
+
+def settings_handler(message):
+    settings = load_settings()
+    
+    signup_status = "🟢 ON" if settings.get('signup_enabled', True) else "🔴 OFF"
+    notif_status = "🟢 ON" if settings.get('notifications_enabled', True) else "🔴 OFF"
+    popup_status = "🟢 ON" if settings.get('telegram_popup', True) else "🔴 OFF"
+    
+    response = "⚙ **Settings**\n\n"
+    response += f"🔔 Notifications: {notif_status}\n"
+    response += f"📢 Telegram Popup: {popup_status}\n"
+    response += f"🔓 Signup: {signup_status}\n"
+    response += f"📎 Telegram Link: {settings.get('telegram_link', 'Not set')}\n"
+    response += f"👤 Contact Owner: {settings.get('contact_owner', 'Not set')}\n\n"
+    response += "Use the buttons below to change settings:"
+    
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("🔔 Notif ON", callback_data='notif_on'),
+        types.InlineKeyboardButton("🔕 Notif OFF", callback_data='notif_off')
+    )
+    markup.add(
+        types.InlineKeyboardButton("📢 Popup ON", callback_data='popup_on'),
+        types.InlineKeyboardButton("🔇 Popup OFF", callback_data='popup_off')
+    )
+    markup.add(
+        types.InlineKeyboardButton("🔓 Signup ON", callback_data='signup_on'),
+        types.InlineKeyboardButton("🔒 Signup OFF", callback_data='signup_off')
+    )
+    markup.add(
+        types.InlineKeyboardButton("📎 Set Link", callback_data='set_link'),
+        types.InlineKeyboardButton("✏️ Edit Contact", callback_data='edit_contact')
+    )
+    markup.add(types.InlineKeyboardButton("🔙 Back", callback_data='back_to_start'))
+    
+    bot.reply_to(message, response, parse_mode='Markdown', reply_markup=markup)
+
+def add_user_handler(message):
+    user_id = message.from_user.id
+    clear_user_state(user_id)
+    
+    cancel_keyboard = types.ReplyKeyboardMarkup(row_width=1, resize_keyboard=True)
+    cancel_keyboard.add(types.KeyboardButton("❌ Cancel"))
+    
+    msg = bot.reply_to(message, "👤 **Enter username:**\n\nType /cancel to cancel", parse_mode='Markdown', reply_markup=cancel_keyboard)
+    set_user_state(user_id, {'state': 'add_user_username', 'message_id': msg.message_id, 'step': 'username'})
+
+def process_add_user_username(message):
+    user_id = message.from_user.id
+    text = message.text.strip()
+    
+    if text == "❌ Cancel" or text == "/cancel":
+        bot.reply_to(message, "❌ Operation cancelled", reply_markup=get_main_keyboard())
+        clear_user_state(user_id)
+        return
+    
+    if not text:
+        bot.reply_to(message, "❌ Invalid username. Try again or type /cancel", reply_markup=get_main_keyboard())
+        clear_user_state(user_id)
+        return
+    
+    state = user_states.get(user_id, {})
+    state['username'] = text
+    state['state'] = 'add_user_password'
+    state['step'] = 'password'
+    user_states[user_id] = state
+    
+    cancel_keyboard = types.ReplyKeyboardMarkup(row_width=1, resize_keyboard=True)
+    cancel_keyboard.add(types.KeyboardButton("❌ Cancel"))
+    
+    msg = bot.reply_to(message, f"🔑 **Enter password for `{text}`:**\n\nType /cancel to cancel", parse_mode='Markdown', reply_markup=cancel_keyboard)
+    user_states[user_id]['message_id'] = msg.message_id
+
+def process_add_user_password(message):
+    user_id = message.from_user.id
+    state = user_states.get(user_id, {})
+    text = message.text.strip()
+    
+    if text == "❌ Cancel" or text == "/cancel":
+        bot.reply_to(message, "❌ Operation cancelled", reply_markup=get_main_keyboard())
+        clear_user_state(user_id)
+        return
+    
+    username = state.get('username')
+    password = text
+    
+    if not password or not username:
+        bot.reply_to(message, "❌ Invalid input. Try again.", reply_markup=get_main_keyboard())
+        clear_user_state(user_id)
+        return
+    
+    users = load_users()
+    if username in users:
+        bot.reply_to(message, f"⚠️ User `{username}` already exists!", parse_mode='Markdown', reply_markup=get_main_keyboard())
+        clear_user_state(user_id)
+        return
+    
+    users[username] = {
+        'password': password,
+        'role': 'user',
+        'created': datetime.now().isoformat()
+    }
+    save_users(users)
+    
+    user_dir = os.path.join(UPLOAD_DIR, username)
+    os.makedirs(user_dir, exist_ok=True)
+    
+    bot.reply_to(message, f"✅ User `{username}` added successfully!", parse_mode='Markdown', reply_markup=get_main_keyboard())
+    clear_user_state(user_id)
+
+def process_add_admin(message):
+    user_id = message.from_user.id
+    username = message.text.strip()
+    
+    if not username:
+        bot.reply_to(message, "❌ Invalid username", reply_markup=get_main_keyboard())
+        clear_user_state(user_id)
+        return
+    
+    users = load_users()
+    
+    if username not in users:
+        bot.reply_to(message, f"⚠️ User `{username}` does not exist!", parse_mode='Markdown', reply_markup=get_main_keyboard())
+        clear_user_state(user_id)
+        return
+    
+    if users[username].get('role') == 'admin':
+        bot.reply_to(message, f"⚠️ User `{username}` is already admin!", parse_mode='Markdown', reply_markup=get_main_keyboard())
+        clear_user_state(user_id)
+        return
+    
+    if users[username].get('role') == 'owner':
+        bot.reply_to(message, f"⚠️ User `{username}` is owner!", parse_mode='Markdown', reply_markup=get_main_keyboard())
+        clear_user_state(user_id)
+        return
+    
+    users[username]['role'] = 'admin'
+    save_users(users)
+    bot.reply_to(message, f"✅ User `{username}` promoted to admin!", parse_mode='Markdown', reply_markup=get_main_keyboard())
+    clear_user_state(user_id)
+
+def owner_info_handler(message):
+    users = load_users()
+    owner = users.get('riyaj', {'password': 'riyaj', 'role': 'owner'})
+    
+    response = "👑 **Owner Info**\n\n"
+    response += f"Username: `riyaj`\n"
+    response += f"Password: `{owner.get('password', 'riyaj')}`\n\n"
+    response += "⚠️ Keep this safe!"
+    
+    bot.reply_to(message, response, parse_mode='Markdown', reply_markup=get_main_keyboard())
+
+def edit_contact_owner_handler(message):
+    msg = bot.reply_to(
+        message, 
+        "✏️ **Edit Contact Owner**\n\nSend new username (without @) or `0` to reset to default.",
+        parse_mode='Markdown',
+        reply_markup=types.ReplyKeyboardRemove()
+    )
+    set_user_state(message.from_user.id, {'state': 'edit_contact_owner', 'message_id': msg.message_id})
+
+def process_edit_contact_owner(message):
+    user_id = message.from_user.id
+    username = message.text.strip()
+    
+    if not username:
+        bot.reply_to(message, "❌ Invalid username", reply_markup=get_main_keyboard())
+        clear_user_state(user_id)
+        return
+    
+    settings = load_settings()
+    if username == '0':
+        settings['contact_owner'] = 'Card_hacker_12'
+        bot.reply_to(message, "✅ Contact owner reset to default: Card_hacker_12", reply_markup=get_main_keyboard())
+    else:
+        username = username.replace('@', '').strip()
+        settings['contact_owner'] = username
+        bot.reply_to(message, f"✅ Contact owner set to: {username}", reply_markup=get_main_keyboard())
+    
+    save_settings(settings)
+    clear_user_state(user_id)
+
+def change_owner_username_handler(message):
+    msg = bot.reply_to(
+        message, 
+        "✏️ **Change Owner Username**\n\nSend new username:", 
+        parse_mode='Markdown',
+        reply_markup=types.ReplyKeyboardRemove()
+    )
+    set_user_state(message.from_user.id, {'state': 'change_owner_username', 'message_id': msg.message_id})
+
+def change_owner_password_handler(message):
+    msg = bot.reply_to(
+        message, 
+        "🔑 **Change Owner Password**\n\nSend new password:", 
+        parse_mode='Markdown',
+        reply_markup=types.ReplyKeyboardRemove()
+    )
+    set_user_state(message.from_user.id, {'state': 'change_owner_password', 'message_id': msg.message_id})
+
+def process_change_owner_username(message):
+    user_id = message.from_user.id
+    new_username = message.text.strip()
+    
+    if not new_username:
+        bot.reply_to(message, "❌ Invalid username", reply_markup=get_main_keyboard())
+        clear_user_state(user_id)
+        return
+    
+    users = load_users()
+    
+    if new_username in users:
+        bot.reply_to(message, f"⚠️ Username `{new_username}` already exists!", parse_mode='Markdown', reply_markup=get_main_keyboard())
+        clear_user_state(user_id)
+        return
+    
+    old_username = None
+    for uname, info in users.items():
+        if info.get('role') == 'owner':
+            old_username = uname
+            break
+    
+    if not old_username:
+        bot.reply_to(message, "❌ Owner not found!", reply_markup=get_main_keyboard())
+        clear_user_state(user_id)
+        return
+    
+    owner_password = users[old_username].get('password', 'riyaj')
+    owner_telegram_id = users[old_username].get('telegram_id', str(OWNER_ID))
+    owner_created = users[old_username].get('created', datetime.now().isoformat())
+    
+    users[new_username] = {
+        'password': owner_password,
+        'role': 'owner',
+        'created': owner_created,
+        'telegram_id': owner_telegram_id
+    }
+    del users[old_username]
+    save_users(users)
+    
+    old_dir = os.path.join(UPLOAD_DIR, old_username)
+    new_dir = os.path.join(UPLOAD_DIR, new_username)
+    if os.path.exists(old_dir):
+        os.rename(old_dir, new_dir)
+    
+    old_bot_dir = get_bot_user_dir(old_username)
+    new_bot_dir = get_bot_user_dir(new_username)
+    if os.path.exists(old_bot_dir):
+        os.rename(old_bot_dir, new_bot_dir)
+    
+    bot.reply_to(message, f"✅ Owner username changed from `{old_username}` to `{new_username}`!\n\nNow login with:\n👤 Username: `{new_username}`\n🔑 Password: `{owner_password}`", parse_mode='Markdown', reply_markup=get_main_keyboard())
+    clear_user_state(user_id)
+
+def process_change_owner_password(message):
+    user_id = message.from_user.id
+    new_password = message.text.strip()
+    
+    if not new_password:
+        bot.reply_to(message, "❌ Invalid password", reply_markup=get_main_keyboard())
+        clear_user_state(user_id)
+        return
+    
+    users = load_users()
+    
+    owner_username = None
+    for uname, info in users.items():
+        if info.get('role') == 'owner':
+            owner_username = uname
+            break
+    
+    if not owner_username:
+        bot.reply_to(message, "❌ Owner not found!", reply_markup=get_main_keyboard())
+        clear_user_state(user_id)
+        return
+    
+    users[owner_username]['password'] = new_password
+    save_users(users)
+    
+    bot.reply_to(message, f"✅ Owner password changed successfully!\n\nNow login with:\n👤 Username: `{owner_username}`\n🔑 Password: `{new_password}`", parse_mode='Markdown', reply_markup=get_main_keyboard())
+    clear_user_state(user_id)
+
+def backup_handler(message):
+    # Create backup and send
+    try:
+        backup_path = create_backup("bot_backup")
+        storage = get_storage_info()
+        
+        response = f"📦 **Backup Created**\n\n"
+        response += f"📁 Backup: `{os.path.basename(backup_path)}`\n"
+        response += f"💾 Storage: {storage['used_mb']:.1f}MB / {storage['max_mb']:.1f}MB ({storage['percent']:.1f}%)\n"
+        response += f"🕐 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        
+        send_telegram_message(OWNER_ID, response)
+        send_backup_to_telegram(backup_path, "📦 Backup File")
+        
+        bot.reply_to(message, f"✅ Backup created: `{os.path.basename(backup_path)}`", parse_mode='Markdown', reply_markup=get_main_keyboard())
+    except Exception as e:
+        bot.reply_to(message, f"❌ Backup failed: {e}", reply_markup=get_main_keyboard())
+
+def storage_handler(message):
+    storage = get_storage_info()
+    
+    used = storage['used_mb']
+    max = storage['max_mb']
+    percent = storage['percent']
+    files = storage['files']
+    
+    warning = "⚠️" if percent > 80 else "✅"
+    status = "Warning: Storage almost full!" if percent > 80 else "Healthy"
+    
+    response = f"💾 **Storage Info**\n\n"
+    response += f"📊 Used: {used:.1f} MB / {max:.1f} MB\n"
+    response += f"📈 Used %: {percent:.1f}%\n"
+    response += f"📄 Files: {files}\n"
+    response += f"Status: {warning} {status}\n\n"
+    response += "Auto-cleanup triggers at 90% usage.\n"
+    response += "Keeps latest 5 files per user (running files + bot token files are preserved)."
+    
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(types.InlineKeyboardButton("🧹 Cleanup Now", callback_data='storage_cleanup'))
+    markup.add(types.InlineKeyboardButton("🔄 Refresh", callback_data='storage_refresh'))
+    markup.add(types.InlineKeyboardButton("🔙 Back", callback_data='back_to_start'))
+    
+    bot.reply_to(message, response, parse_mode='Markdown', reply_markup=markup)
+
+# ============================================================
+# INLINE CALLBACK HANDLERS - EXTENDED
+# ============================================================
+
+@bot.callback_query_handler(func=lambda call: True)
+def handle_settings_callbacks(call):
+    user_id = call.from_user.id
+    data = call.data
+    
+    clear_user_state(user_id)
+    
+    # View file details
+    if data.startswith('viewfile_'):
+        file_data = data.split('_')
+        if len(file_data) < 3:
+            bot.answer_callback_query(call.id, "Invalid")
+            return
+        
+        file_id = file_data[1]
+        username = file_data[2]
+        
+        user_files = get_user_files(username)
+        target_file = None
+        for f in user_files:
+            if f['id'] == file_id:
+                target_file = f
+                break
+        
+        if not target_file:
+            bot.answer_callback_query(call.id, "File not found")
+            return
+        
+        status_icon = "🟢" if target_file['status'] == 'running' else "🔴"
+        bot_name = f" @{target_file['bot_username']}" if target_file.get('bot_username') else ""
+        
+        response = f"📄 **File: `{target_file['filename']}`**\n"
+        response += f"Status: {status_icon} {target_file['status']}\n"
+        response += f"Size: {target_file['size']//1024} KB\n"
+        response += f"Owner: `{target_file['owner']}`\n"
+        if bot_name:
+            response += f"Bot: {bot_name}\n"
+        
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        if target_file['status'] != 'running':
+            markup.add(types.InlineKeyboardButton("▶ Start", callback_data=f'start_{file_id}_{username}'))
+        if target_file['status'] == 'running':
+            markup.add(types.InlineKeyboardButton("■ Stop", callback_data=f'stop_{file_id}_{username}'))
+        markup.add(types.InlineKeyboardButton("↻ Restart", callback_data=f'restart_{file_id}_{username}'))
+        markup.add(types.InlineKeyboardButton("📄 Logs", callback_data=f'logs_{file_id}_{username}'))
+        markup.add(types.InlineKeyboardButton("⬇ Download", callback_data=f'download_{file_id}_{username}'))
+        markup.add(types.InlineKeyboardButton("🗑 Delete", callback_data=f'delete_{file_id}_{username}'))
+        markup.add(types.InlineKeyboardButton("🔙 Back", callback_data='back_to_start'))
+        
+        bot.edit_message_text(response, call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=markup)
+        bot.answer_callback_query(call.id)
+        return
+    
+    # File actions
+    if data.startswith('start_'):
+        file_data = data.split('_')
+        if len(file_data) < 3:
+            bot.answer_callback_query(call.id, "Invalid")
+            return
+        file_id = file_data[1]
+        username = file_data[2]
+        
+        try:
+            response = requests.post(
+                f"{request.host_url}api/files/start/{file_id}",
+                headers={'X-Username': username}
+            )
+            if response.status_code == 200:
+                bot.answer_callback_query(call.id, "✅ File started")
+                call.data = f'viewfile_{file_id}_{username}'
+                handle_settings_callbacks(call)
+            else:
+                bot.answer_callback_query(call.id, "❌ Failed to start")
+        except Exception as e:
+            print(f"Start error: {e}")
+            bot.answer_callback_query(call.id, "❌ Error")
+        return
+    
+    if data.startswith('stop_'):
+        file_data = data.split('_')
+        if len(file_data) < 3:
+            bot.answer_callback_query(call.id, "Invalid")
+            return
+        file_id = file_data[1]
+        username = file_data[2]
+        
+        try:
+            response = requests.post(
+                f"{request.host_url}api/files/stop/{file_id}",
+                headers={'X-Username': username}
+            )
+            if response.status_code == 200:
+                bot.answer_callback_query(call.id, "✅ File stopped")
+                call.data = f'viewfile_{file_id}_{username}'
+                handle_settings_callbacks(call)
+            else:
+                bot.answer_callback_query(call.id, "❌ Failed to stop")
+        except Exception as e:
+            print(f"Stop error: {e}")
+            bot.answer_callback_query(call.id, "❌ Error")
+        return
+    
+    if data.startswith('restart_'):
+        file_data = data.split('_')
+        if len(file_data) < 3:
+            bot.answer_callback_query(call.id, "Invalid")
+            return
+        file_id = file_data[1]
+        username = file_data[2]
+        
+        try:
+            requests.post(
+                f"{request.host_url}api/files/stop/{file_id}",
+                headers={'X-Username': username}
+            )
+            response = requests.post(
+                f"{request.host_url}api/files/start/{file_id}",
+                headers={'X-Username': username}
+            )
+            if response.status_code == 200:
+                bot.answer_callback_query(call.id, "✅ File restarted")
+                call.data = f'viewfile_{file_id}_{username}'
+                handle_settings_callbacks(call)
+            else:
+                bot.answer_callback_query(call.id, "❌ Failed to restart")
+        except Exception as e:
+            print(f"Restart error: {e}")
+            bot.answer_callback_query(call.id, "❌ Error")
+        return
+    
+    if data.startswith('logs_'):
+        file_data = data.split('_')
+        if len(file_data) < 3:
+            bot.answer_callback_query(call.id, "Invalid")
+            return
+        file_id = file_data[1]
+        username = file_data[2]
+        
+        try:
+            response = requests.get(
+                f"{request.host_url}api/files/logs/{file_id}",
+                headers={'X-Username': username}
+            )
+            if response.status_code == 200:
+                logs = response.json().get('logs', 'No logs available')
+                if len(logs) > 4000:
+                    logs = logs[:4000] + '\n... (truncated)'
+                bot.answer_callback_query(call.id)
+                bot.send_message(call.message.chat.id, f"📄 **Logs for file:**\n\n```\n{logs}\n```", parse_mode='Markdown')
+            else:
+                bot.answer_callback_query(call.id, "❌ Failed to get logs")
+        except Exception as e:
+            print(f"Logs error: {e}")
+            bot.answer_callback_query(call.id, "❌ Error")
+        return
+    
+    if data.startswith('download_'):
+        file_data = data.split('_')
+        if len(file_data) < 3:
+            bot.answer_callback_query(call.id, "Invalid")
+            return
+        file_id = file_data[1]
+        username = file_data[2]
+        
+        try:
+            response = requests.get(
+                f"{request.host_url}api/files/download/{file_id}",
+                headers={'X-Username': username}
+            )
+            if response.status_code == 200:
+                bot.answer_callback_query(call.id, "⬇ Download started from website")
+            else:
+                bot.answer_callback_query(call.id, "❌ Failed to download")
+        except Exception as e:
+            print(f"Download error: {e}")
+            bot.answer_callback_query(call.id, "❌ Error")
+        return
+    
+    if data.startswith('delete_'):
+        file_data = data.split('_')
+        if len(file_data) < 3:
+            bot.answer_callback_query(call.id, "Invalid")
+            return
+        file_id = file_data[1]
+        username = file_data[2]
+        
+        try:
+            response = requests.delete(
+                f"{request.host_url}api/files/delete/{file_id}",
+                headers={'X-Username': username}
+            )
+            if response.status_code == 200:
+                bot.answer_callback_query(call.id, "🗑 File deleted")
+                bot.edit_message_text("✅ File deleted successfully", call.message.chat.id, call.message.message_id)
+                class FakeMessage:
+                    def __init__(self, chat_id, from_user):
+                        self.chat = type('obj', (object,), {'id': chat_id})()
+                        self.from_user = type('obj', (object,), {'id': from_user})()
+                fake_msg = FakeMessage(call.message.chat.id, call.from_user.id)
+                bot_list_handler(fake_msg)
+            else:
+                bot.answer_callback_query(call.id, "❌ Failed to delete")
+        except Exception as e:
+            print(f"Delete error: {e}")
+            bot.answer_callback_query(call.id, "❌ Error")
+        return
+    
+    # Admin panel callbacks
+    if data == 'admin_userlist':
+        users = load_users()
+        user_list = {u: info for u, info in users.items() if info.get('role') != 'owner'}
+        
+        if not user_list:
+            bot.edit_message_text("👥 **No users found**", call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=get_main_keyboard())
+            bot.answer_callback_query(call.id)
+            return
+        
+        response = "👥 **User List:**\n\n"
+        for username, info in user_list.items():
+            role = info.get('role', 'user')
+            if role == 'owner':
+                response += f"👑 `{username}` (Owner)\n"
+            else:
+                response += f"👤 `{username}` (🔑 `{info['password']}`)\n"
+        
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("🔙 Back to Admin Panel", callback_data='admin_panel'))
+        bot.edit_message_text(response, call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=markup)
+        bot.answer_callback_query(call.id)
+        return
+    
+    elif data == 'admin_adduser':
+        bot.edit_message_text("➕ **Add User**\n\nSend username:", call.message.chat.id, call.message.message_id, parse_mode='Markdown')
+        set_user_state(call.from_user.id, {'state': 'add_user_username', 'chat_id': call.message.chat.id, 'message_id': call.message.message_id})
+        bot.answer_callback_query(call.id)
+        return
+    
+    elif data == 'admin_adminslist':
+        users = load_users()
+        admin_list = {u: info for u, info in users.items() if info.get('role') in ['admin', 'owner']}
+        
+        user_id = call.from_user.id
+        if user_id != OWNER_ID:
+            admin_list = {u: info for u, info in admin_list.items() if u != 'riyaj'}
+        
+        if not admin_list:
+            bot.edit_message_text("👑 **No admins found**", call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=get_main_keyboard())
+            bot.answer_callback_query(call.id)
+            return
+        
+        response = "👑 **Admins List:**\n\n"
+        for username, info in admin_list.items():
+            if username == 'riyaj':
+                response += f"👑 {username} (Owner)\n"
+            else:
+                response += f"🛡️ `{username}` (🔑 `{info['password']}`)\n"
+        
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("🔙 Back to Admin Panel", callback_data='admin_panel'))
+        bot.edit_message_text(response, call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=markup)
+        bot.answer_callback_query(call.id)
+        return
+    
+    elif data == 'admin_addadmin':
+        bot.edit_message_text("➕ **Add Admin**\n\nSend existing username to promote to admin:", call.message.chat.id, call.message.message_id, parse_mode='Markdown')
+        set_user_state(call.from_user.id, {'state': 'add_admin', 'chat_id': call.message.chat.id, 'message_id': call.message.message_id})
+        bot.answer_callback_query(call.id)
+        return
+    
+    elif data == 'admin_ownerinfo':
+        users = load_users()
+        owner = users.get('riyaj', {'password': 'riyaj', 'role': 'owner'})
+        
+        response = "👑 **Owner Info**\n\n"
+        response += f"Username: `riyaj`\n"
+        response += f"Password: `{owner.get('password', 'riyaj')}`\n\n"
+        response += "⚠️ Keep this safe!"
+        
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("🔙 Back to Admin Panel", callback_data='admin_panel'))
+        bot.edit_message_text(response, call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=markup)
+        bot.answer_callback_query(call.id)
+        return
+    
+    elif data == 'admin_change_owner_password':
+        bot.edit_message_text("🔑 **Change Owner Password**\n\nSend new password:", call.message.chat.id, call.message.message_id, parse_mode='Markdown')
+        set_user_state(call.from_user.id, {'state': 'change_owner_password', 'chat_id': call.message.chat.id, 'message_id': call.message.message_id})
+        bot.answer_callback_query(call.id)
+        return
+    
+    elif data == 'admin_change_owner_username':
+        bot.edit_message_text("✏️ **Change Owner Username**\n\nSend new username:", call.message.chat.id, call.message.message_id, parse_mode='Markdown')
+        set_user_state(call.from_user.id, {'state': 'change_owner_username', 'chat_id': call.message.chat.id, 'message_id': call.message.message_id})
+        bot.answer_callback_query(call.id)
+        return
+    
+    elif data == 'admin_backup':
+        try:
+            backup_path = create_backup("bot_backup")
+            storage = get_storage_info()
+            response = f"📦 **Backup Created**\n\n📁 Backup: `{os.path.basename(backup_path)}`\n💾 Storage: {storage['used_mb']:.1f}MB / {storage['max_mb']:.1f}MB"
+            send_telegram_message(OWNER_ID, response)
+            send_backup_to_telegram(backup_path, "📦 Backup File")
+            bot.answer_callback_query(call.id, "✅ Backup created")
+            bot.edit_message_text(f"✅ Backup created: `{os.path.basename(backup_path)}`", call.message.chat.id, call.message.message_id, parse_mode='Markdown')
+        except Exception as e:
+            bot.answer_callback_query(call.id, f"❌ {e}")
+        return
+    
+    elif data == 'admin_storage':
+        storage = get_storage_info()
+        used = storage['used_mb']
+        max = storage['max_mb']
+        percent = storage['percent']
+        files = storage['files']
+        
+        warning = "⚠️" if percent > 80 else "✅"
+        status = "Warning: Storage almost full!" if percent > 80 else "Healthy"
+        
+        response = f"💾 **Storage Info**\n\n"
+        response += f"📊 Used: {used:.1f} MB / {max:.1f} MB\n"
+        response += f"📈 Used %: {percent:.1f}%\n"
+        response += f"📄 Files: {files}\n"
+        response += f"Status: {warning} {status}\n\n"
+        response += "Auto-cleanup triggers at 90% usage.\n"
+        response += "Keeps latest 5 files per user."
+        
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        markup.add(types.InlineKeyboardButton("🧹 Cleanup Now", callback_data='storage_cleanup'))
+        markup.add(types.InlineKeyboardButton("🔄 Refresh", callback_data='storage_refresh'))
+        markup.add(types.InlineKeyboardButton("🔙 Back", callback_data='admin_panel'))
+        
+        bot.edit_message_text(response, call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=markup)
+        bot.answer_callback_query(call.id)
+        return
+    
+    elif data == 'storage_cleanup':
+        bot.answer_callback_query(call.id, "🧹 Running cleanup...")
+        try:
+            success = check_and_cleanup()
+            if success:
+                storage = get_storage_info()
+                bot.send_message(call.message.chat.id, f"✅ **Cleanup Complete**\n\nStorage: {storage['used_mb']:.1f}MB / {storage['max_mb']:.1f}MB ({storage['percent']:.1f}%)", parse_mode='Markdown')
+            else:
+                bot.send_message(call.message.chat.id, "✅ Storage is healthy. No cleanup needed.")
+        except Exception as e:
+            bot.send_message(call.message.chat.id, f"❌ Cleanup error: {e}")
+        return
+    
+    elif data == 'storage_refresh':
+        storage = get_storage_info()
+        used = storage['used_mb']
+        max = storage['max_mb']
+        percent = storage['percent']
+        files = storage['files']
+        
+        warning = "⚠️" if percent > 80 else "✅"
+        status = "Warning: Storage almost full!" if percent > 80 else "Healthy"
+        
+        response = f"💾 **Storage Info**\n\n"
+        response += f"📊 Used: {used:.1f} MB / {max:.1f} MB\n"
+        response += f"📈 Used %: {percent:.1f}%\n"
+        response += f"📄 Files: {files}\n"
+        response += f"Status: {warning} {status}"
+        
+        bot.edit_message_text(response, call.message.chat.id, call.message.message_id, parse_mode='Markdown')
+        bot.answer_callback_query(call.id, "🔄 Refreshed")
+        return
+    
+    elif data == 'admin_panel':
+        users = load_users()
+        user_id = call.from_user.id
+        
+        if user_id == OWNER_ID:
+            role = 'owner'
+        else:
+            username = None
+            for uname, info in users.items():
+                if str(user_id) == info.get('telegram_id', ''):
+                    username = uname
+                    break
+            if not username:
+                for uname, info in users.items():
+                    if str(user_id) == uname:
+                        username = uname
+                        break
+            role = users.get(username, {}).get('role', 'user') if username else 'user'
+        
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            types.InlineKeyboardButton("👥 User List", callback_data='admin_userlist'),
+            types.InlineKeyboardButton("➕ Add User", callback_data='admin_adduser')
+        )
+        markup.add(
+            types.InlineKeyboardButton("👑 Admins List", callback_data='admin_adminslist'),
+            types.InlineKeyboardButton("➕ Add Admin", callback_data='admin_addadmin')
+        )
+        if role == 'owner':
+            markup.add(
+                types.InlineKeyboardButton("👤 Owner Info", callback_data='admin_ownerinfo')
+            )
+            markup.add(
+                types.InlineKeyboardButton("🔑 Change Owner Password", callback_data='admin_change_owner_password')
+            )
+            markup.add(
+                types.InlineKeyboardButton("✏️ Change Owner Username", callback_data='admin_change_owner_username')
+            )
+            markup.add(
+                types.InlineKeyboardButton("📦 Backup", callback_data='admin_backup')
+            )
+            markup.add(
+                types.InlineKeyboardButton("💾 Storage", callback_data='admin_storage')
+            )
+        markup.add(types.InlineKeyboardButton("🔙 Back", callback_data='back_to_start'))
+        
+        response = "👑 **Admin Panel**\n\nSelect an option below:"
+        bot.edit_message_text(response, call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=markup)
+        bot.answer_callback_query(call.id)
+        return
+    
+    # Original settings callbacks
+    if data == 'notif_on':
+        settings = load_settings()
+        settings['notifications_enabled'] = True
+        save_settings(settings)
+        bot.answer_callback_query(call.id, "🔔 Notifications ON")
+        bot.edit_message_text("✅ Notifications turned ON", call.message.chat.id, call.message.message_id, reply_markup=get_main_keyboard())
+        return
+    
+    elif data == 'notif_off':
+        settings = load_settings()
+        settings['notifications_enabled'] = False
+        save_settings(settings)
+        bot.answer_callback_query(call.id, "🔕 Notifications OFF")
+        bot.edit_message_text("✅ Notifications turned OFF", call.message.chat.id, call.message.message_id, reply_markup=get_main_keyboard())
+        return
+    
+    elif data == 'popup_on':
+        settings = load_settings()
+        settings['telegram_popup'] = True
+        save_settings(settings)
+        bot.answer_callback_query(call.id, "📢 Popup ON")
+        bot.edit_message_text("✅ Telegram Popup turned ON", call.message.chat.id, call.message.message_id, reply_markup=get_main_keyboard())
+        return
+    
+    elif data == 'popup_off':
+        settings = load_settings()
+        settings['telegram_popup'] = False
+        save_settings(settings)
+        bot.answer_callback_query(call.id, "🔇 Popup OFF")
+        bot.edit_message_text("✅ Telegram Popup turned OFF", call.message.chat.id, call.message.message_id, reply_markup=get_main_keyboard())
+        return
+    
+    elif data == 'signup_on':
+        settings = load_settings()
+        settings['signup_enabled'] = True
+        save_settings(settings)
+        bot.answer_callback_query(call.id, "🔓 Signup ON")
+        bot.edit_message_text("✅ Signup ENABLED", call.message.chat.id, call.message.message_id, reply_markup=get_main_keyboard())
+        return
+    
+    elif data == 'signup_off':
+        settings = load_settings()
+        settings['signup_enabled'] = False
+        save_settings(settings)
+        bot.answer_callback_query(call.id, "🔒 Signup OFF")
+        bot.edit_message_text("✅ Signup DISABLED", call.message.chat.id, call.message.message_id, reply_markup=get_main_keyboard())
+        return
+    
+    elif data == 'set_link':
+        msg = bot.send_message(call.message.chat.id, "📎 **Enter Telegram channel/group link:**\nExample: `https://t.me/+m0R5z1yhmCtiZjQ9`", parse_mode='Markdown', reply_markup=types.ReplyKeyboardRemove())
+        set_user_state(user_id, {'state': 'set_link', 'message': call.message})
+        bot.register_next_step_handler(msg, process_set_link, call.message)
+        return
+    
+    elif data == 'edit_contact':
+        msg = bot.send_message(call.message.chat.id, "✏️ **Enter new contact owner username (without @):**", parse_mode='Markdown', reply_markup=types.ReplyKeyboardRemove())
+        set_user_state(user_id, {'state': 'edit_contact', 'message': call.message})
+        bot.register_next_step_handler(msg, process_edit_contact_inline, call.message)
+        return
+    
+    elif data == 'back_to_start':
+        class FakeMessage:
+            def __init__(self, chat_id, from_user):
+                self.chat = type('obj', (object,), {'id': chat_id})()
+                self.from_user = type('obj', (object,), {'id': from_user})()
+                self.text = '/start'
+        fake_msg = FakeMessage(call.message.chat.id, user_id)
+        start_message(fake_msg)
+        return
+
+def process_set_link(message, original_message):
+    user_id = message.from_user.id
+    link = message.text.strip()
+    
+    if not link:
+        bot.reply_to(message, "❌ Invalid link", reply_markup=get_main_keyboard())
+        clear_user_state(user_id)
+        return
+    
+    settings = load_settings()
+    settings['telegram_link'] = link
+    save_settings(settings)
+    bot.reply_to(message, f"✅ Telegram link set to:\n{link}", reply_markup=get_main_keyboard())
+    clear_user_state(user_id)
+
+def process_edit_contact_inline(message, original_message):
+    user_id = message.from_user.id
+    username = message.text.strip()
+    
+    if not username:
+        bot.reply_to(message, "❌ Invalid username", reply_markup=get_main_keyboard())
+        clear_user_state(user_id)
+        return
+    
+    settings = load_settings()
+    if username == '0':
+        settings['contact_owner'] = 'Card_hacker_12'
+        bot.reply_to(message, "✅ Contact owner reset to default: Card_hacker_12", reply_markup=get_main_keyboard())
+    else:
+        username = username.replace('@', '').strip()
+        settings['contact_owner'] = username
+        bot.reply_to(message, f"✅ Contact owner set to: {username}", reply_markup=get_main_keyboard())
+    
+    save_settings(settings)
+    clear_user_state(user_id)
+
+# ============================================================
+# COMMAND HANDLERS
+# ============================================================
+
+@bot.message_handler(commands=['notif_on'])
+def notif_on_cmd(message):
+    settings = load_settings()
+    settings['notifications_enabled'] = True
+    save_settings(settings)
+    bot.reply_to(message, "🔔 Notifications ON", reply_markup=get_main_keyboard())
+
+@bot.message_handler(commands=['notif_off'])
+def notif_off_cmd(message):
+    settings = load_settings()
+    settings['notifications_enabled'] = False
+    save_settings(settings)
+    bot.reply_to(message, "🔕 Notifications OFF", reply_markup=get_main_keyboard())
+
+@bot.message_handler(commands=['popup_on'])
+def popup_on_cmd(message):
+    settings = load_settings()
+    settings['telegram_popup'] = True
+    save_settings(settings)
+    bot.reply_to(message, "📢 Telegram Popup ON", reply_markup=get_main_keyboard())
+
+@bot.message_handler(commands=['popup_off'])
+def popup_off_cmd(message):
+    settings = load_settings()
+    settings['telegram_popup'] = False
+    save_settings(settings)
+    bot.reply_to(message, "📢 Telegram Popup OFF", reply_markup=get_main_keyboard())
+
+@bot.message_handler(commands=['signup_on'])
+def signup_on_cmd(message):
+    settings = load_settings()
+    settings['signup_enabled'] = True
+    save_settings(settings)
+    bot.reply_to(message, "🔓 Signup ENABLED", reply_markup=get_main_keyboard())
+
+@bot.message_handler(commands=['signup_off'])
+def signup_off_cmd(message):
+    settings = load_settings()
+    settings['signup_enabled'] = False
+    save_settings(settings)
+    bot.reply_to(message, "🔒 Signup DISABLED", reply_markup=get_main_keyboard())
+
+@bot.message_handler(commands=['set_link'])
+def set_link_cmd(message):
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        bot.reply_to(message, "❌ Usage: /set_link <telegram_link>", reply_markup=get_main_keyboard())
+        return
+    
+    link = parts[1].strip()
+    settings = load_settings()
+    settings['telegram_link'] = link
+    save_settings(settings)
+    bot.reply_to(message, f"✅ Telegram link set to:\n{link}", reply_markup=get_main_keyboard())
+
+@bot.message_handler(commands=['edit_contact'])
+def edit_contact_cmd(message):
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        bot.reply_to(message, "❌ Usage: /edit_contact <username> (without @)", reply_markup=get_main_keyboard())
+        return
+    
+    username = parts[1].strip().replace('@', '')
+    settings = load_settings()
+    settings['contact_owner'] = username
+    save_settings(settings)
+    bot.reply_to(message, f"✅ Contact owner set to: {username}", reply_markup=get_main_keyboard())
+
+@bot.message_handler(commands=['remove_user'])
+def remove_user_cmd(message):
+    parts = message.text.split()
+    if len(parts) < 2:
+        bot.reply_to(message, "❌ Usage: /remove_user <username>", reply_markup=get_main_keyboard())
+        return
+    
+    username = parts[1]
+    users = load_users()
+    
+    if username not in users:
+        bot.reply_to(message, "❌ User not found", reply_markup=get_main_keyboard())
+        return
+    
+    if users[username].get('role') in ['owner', 'admin']:
+        bot.reply_to(message, "⚠️ Cannot remove admin/owner", reply_markup=get_main_keyboard())
+        return
+    
+    user_dir = os.path.join(UPLOAD_DIR, username)
+    if os.path.exists(user_dir):
+        shutil.rmtree(user_dir)
+    
+    bot_user_dir = get_bot_user_dir(username)
+    if os.path.exists(bot_user_dir):
+        shutil.rmtree(bot_user_dir)
+    
+    del users[username]
+    save_users(users)
+    bot.reply_to(message, f"✅ User `{username}` removed", parse_mode='Markdown', reply_markup=get_main_keyboard())
+
+@bot.message_handler(commands=['add_admin'])
+def add_admin_cmd(message):
+    parts = message.text.split()
+    if len(parts) < 2:
+        bot.reply_to(message, "❌ Usage: /add_admin <username>", reply_markup=get_main_keyboard())
+        return
+    
+    username = parts[1]
+    users = load_users()
+    
+    if username not in users:
+        bot.reply_to(message, f"⚠️ User `{username}` does not exist!", parse_mode='Markdown', reply_markup=get_main_keyboard())
+        return
+    
+    if users[username].get('role') == 'admin':
+        bot.reply_to(message, f"⚠️ User `{username}` is already admin!", parse_mode='Markdown', reply_markup=get_main_keyboard())
+        return
+    
+    if users[username].get('role') == 'owner':
+        bot.reply_to(message, f"⚠️ User `{username}` is owner!", parse_mode='Markdown', reply_markup=get_main_keyboard())
+        return
+    
+    users[username]['role'] = 'admin'
+    save_users(users)
+    bot.reply_to(message, f"✅ User `{username}` promoted to admin!", parse_mode='Markdown', reply_markup=get_main_keyboard())
+
+@bot.message_handler(commands=['admins_list'])
+def admins_list_cmd(message):
+    users = load_users()
+    admin_list = {u: info for u, info in users.items() if info.get('role') in ['admin', 'owner']}
+    
+    user_id = message.from_user.id
+    if str(user_id) != OWNER_ID:
+        admin_list = {u: info for u, info in admin_list.items() if u != 'riyaj'}
+    
+    if not admin_list:
+        bot.reply_to(message, "👑 **No admins found**", parse_mode='Markdown', reply_markup=get_main_keyboard())
+        return
+    
+    response = "👑 **Admins List:**\n\n"
+    for username, info in admin_list.items():
+        if username == 'riyaj':
+            response += f"👑 {username} (Owner)\n"
+        else:
+            response += f"🛡️ `{username}` (🔑 `{info['password']}`)\n"
+    
+    bot.reply_to(message, response, parse_mode='Markdown', reply_markup=get_main_keyboard())
+
+@bot.message_handler(commands=['backup'])
+def backup_cmd(message):
+    if not is_owner_authenticated(message.from_user.id) and message.from_user.id != OWNER_ID:
+        bot.reply_to(message, "⚠️ Owner only", reply_markup=get_main_keyboard())
+        return
+    backup_handler(message)
+
+@bot.message_handler(commands=['storage'])
+def storage_cmd(message):
+    if not is_owner_authenticated(message.from_user.id) and message.from_user.id != OWNER_ID:
+        bot.reply_to(message, "⚠️ Owner only", reply_markup=get_main_keyboard())
+        return
+    storage_handler(message)
+
+# ============================================================
+# STORAGE CLEANUP ROUTE
+# ============================================================
+
+@app.route('/api/storage/cleanup', methods=['POST'])
+@require_owner
+def cleanup_storage_route(username):
+    try:
+        storage_before = get_storage_info()
+        success = check_and_cleanup()
+        storage_after = get_storage_info()
+        
+        if success:
+            return jsonify({
+                'message': 'Cleanup completed',
+                'before': storage_before,
+                'after': storage_after
+            })
+        else:
+            return jsonify({
+                'message': 'No cleanup needed',
+                'storage': storage_after
+            })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# ============================================================
+# SCHEDULED AUTO BACKUP
+# ============================================================
+
+def start_scheduler():
+    try:
+        # Schedule backup every 6 hours
+        schedule.every(6).hours.do(auto_backup)
+        print("✅ Auto-backup scheduled every 6 hours")
+        
+        # Also check storage every hour
+        schedule.every(1).hours.do(lambda: check_and_cleanup())
+        print("✅ Storage check scheduled every hour")
+        
+        # Run initial backup after 5 minutes
+        def initial_backup():
+            time.sleep(300)
+            auto_backup()
+        
+        threading.Thread(target=initial_backup, daemon=True).start()
+        
+        while True:
+            schedule.run_pending()
+            time.sleep(60)
+    except Exception as e:
+        print(f"⚠️ Scheduler error: {e}")
 
 # ============================================================
 # START APPLICATION
@@ -4330,12 +6364,16 @@ if __name__ == '__main__':
     print(f"🤖 Bot Username: {BOT_USERNAME}")
     print(f"🔐 Secret Owner: {OWNER_ID}")
     print(f"🔑 Owner Password: {OWNER_PASSWORD}")
-    print(f"📧 Email Backups to: {EMAIL_RECEIVER}")
-    print(f"💾 Max Storage: {MAX_STORAGE_MB}MB")
     print(f"🌐 Website Port: {port}")
+    print(f"💾 Storage Limit: {MAX_STORAGE_BYTES // (1024*1024)}MB")
     print("="*60)
     
     ensure_default_users()
+    
+    # Start scheduler thread
+    scheduler_thread = threading.Thread(target=start_scheduler, daemon=True)
+    scheduler_thread.start()
+    print("✅ Scheduler thread started")
     
     # Remove webhook first
     try:
@@ -4343,14 +6381,6 @@ if __name__ == '__main__':
         print("✅ Webhook removed")
     except Exception as e:
         print(f"⚠️ Webhook error: {e}")
-    
-    # Restore processes on startup
-    restore_all_processes()
-    
-    # Send website online notification
-    print("📧 Sending website online notification...")
-    send_website_online_notification()
-    print("✅ Website online notification sent")
     
     def run_bot():
         print("🚀 Bot starting polling...")
@@ -4366,6 +6396,5 @@ if __name__ == '__main__':
     bot_thread.start()
     print("✅ Bot polling thread started")
     
-    # App code mein port is tarah use ho raha hai:
-port = int(os.environ.get('PORT', 3000))
-app.run(host='0.0.0.0', port=port, debug=False)
+    print("🌐 Starting Flask server...")
+    app.run(host='0.0.0.0', port=port, debug=False)
