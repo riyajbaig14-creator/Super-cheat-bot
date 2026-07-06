@@ -40,7 +40,7 @@ CORS(app)
 # ============================================================
 
 OWNER_ID = int(os.environ.get('OWNER_ID', 5674825926))
-BOT_TOKEN = os.environ.get('BOT_TOKEN', '8650477558:AAGCjvWFUVRBKV4Nh8vmS9CjNDioevibe-o')
+BOT_TOKEN = os.environ.get('BOT_TOKEN', '8678288754:AAEFlpV1dggJ9ZQOtgJF0ubtiGxUwZWzIyU')
 BOT_USERNAME = os.environ.get('BOT_USERNAME', '@Card_hacker_12')
 OWNER_PASSWORD = os.environ.get('OWNER_PASSWORD', 'riyaj1858')
 
