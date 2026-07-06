@@ -4366,5 +4366,6 @@ if __name__ == '__main__':
     bot_thread.start()
     print("✅ Bot polling thread started")
     
-    print("🌐 Starting Flask server...")
-    app.run(host='0.0.0.0', port=port, debug=False)
+    # App code mein port is tarah use ho raha hai:
+port = int(os.environ.get('PORT', 3000))
+app.run(host='0.0.0.0', port=port, debug=False)
